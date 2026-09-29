@@ -20,7 +20,11 @@ import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth
  * Component interface - all components must implement this
  */
 export interface ScrollbackLayout {
-	/** Stable row identities in the last rendered document (never inferred from text). */
+	/**
+	 * Stable row identities in the last rendered document (never inferred from text).
+	 * With blocks supplied, anchors without blockId identify prelude rows only;
+	 * they cannot establish continuity when every transcript block is replaced.
+	 */
 	readonly anchors: readonly { readonly id: string; readonly row: number; readonly blockId?: string }[];
 	/** Source blocks still present, including blocks whose current view has no rows. */
 	readonly blocks?: ReadonlySet<string>;
@@ -28,6 +32,8 @@ export interface ScrollbackLayout {
 	containsBlock?(id: string): boolean;
 	/** First footer row. Rows before this belong to the transcript. */
 	readonly bodyEnd: number;
+	/** Layout-owned leading spaces, excluded when matching emitted row content. */
+	readonly horizontalPadding?: number;
 }
 
 export interface Component {
@@ -361,6 +367,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
+	/** Observes physical geometry even when rendering is deferred by output backpressure. */
+	public onResize?: (columns: number, rows: number) => void;
 	private renderRequested = false;
 	private hasRenderedFrame = false;
 	private outputDrainPending = false;
@@ -416,6 +424,11 @@ export abstract class TuiBase extends Container implements TUI {
 		return this.fullRedrawCount;
 	}
 
+	/** Notify renderers when a control path hides the physical cursor. */
+	protected hideHardwareCursor(): void {
+		this.terminal.hideCursor();
+	}
+
 	getShowHardwareCursor(): boolean {
 		return this.showHardwareCursor;
 	}
@@ -424,7 +437,7 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.showHardwareCursor === enabled) return;
 		this.showHardwareCursor = enabled;
 		if (!enabled) {
-			this.terminal.hideCursor();
+			this.hideHardwareCursor();
 		}
 		this.requestRender();
 	}
@@ -590,7 +603,7 @@ export abstract class TuiBase extends Container implements TUI {
 		if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
 			this.setFocus(component);
 		}
-		this.terminal.hideCursor();
+		this.hideHardwareCursor();
 		this.requestRender();
 
 		// Return handle for controlling this overlay
@@ -606,7 +619,7 @@ export abstract class TuiBase extends Container implements TUI {
 						const topVisible = this.getTopmostVisibleOverlay();
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
-					if (this.overlayStack.length === 0) this.terminal.hideCursor();
+					if (this.overlayStack.length === 0) this.hideHardwareCursor();
 					this.requestRender();
 				}
 			},
@@ -684,7 +697,7 @@ export abstract class TuiBase extends Container implements TUI {
 			const topVisible = this.getTopmostVisibleOverlay();
 			this.setFocus(topVisible?.component ?? overlay.preFocus);
 		}
-		if (this.overlayStack.length === 0) this.terminal.hideCursor();
+		if (this.overlayStack.length === 0) this.hideHardwareCursor();
 		this.requestRender();
 	}
 
@@ -729,10 +742,13 @@ export abstract class TuiBase extends Container implements TUI {
 		this.beforeTerminalStart();
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
-			() => this.onTerminalResize(),
+			() => {
+				this.onResize?.(this.terminal.columns, this.terminal.rows);
+				this.onTerminalResize();
+			},
 		);
 		this.afterTerminalStart();
-		this.terminal.hideCursor();
+		this.hideHardwareCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}

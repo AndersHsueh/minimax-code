@@ -280,6 +280,14 @@ export class TuiChatLayout implements Component {
             )
           : renderPart(this.parts.welcome);
       this.viewportLayoutKey = JSON.stringify([...viewportLayout, welcome.length]);
+      if (this.viewport() === 'document') {
+        this.scrollbackLayout = {
+          anchors: welcome.map((_, row) => ({ id: JSON.stringify(['welcome', row]), row })),
+          blocks: new Set(),
+          horizontalPadding: frame.horizontalPadding,
+          bodyEnd: welcome.length + notice.length,
+        };
+      }
       return this.fitDocumentFrame([welcome, ...tailEntries]);
     }
 
@@ -307,8 +315,17 @@ export class TuiChatLayout implements Component {
       const offset = prelude.length - transcript.length;
       this.scrollbackLayout = {
         blocks: transcriptLayout.blocks,
+        horizontalPadding: frame.horizontalPadding,
         containsBlock: transcriptLayout.containsBlock,
-        anchors: transcriptLayout.anchors.map((anchor) => ({ ...anchor, row: anchor.row + offset })),
+        // The native viewport can start inside the welcome while a short transcript
+        // is still entirely on screen. Background chrome/footer updates need an anchor
+        // there too; these rows are not transcript blocks or projection continuity.
+        anchors: [
+          ...(transcriptLayout.blocks
+            ? welcome.slice(0, offset).map((_, row) => ({ id: JSON.stringify(['welcome', row]), row }))
+            : []),
+          ...transcriptLayout.anchors.map((anchor) => ({ ...anchor, row: anchor.row + offset })),
+        ],
         bodyEnd: bodyEntries.reduce((sum, lines) => sum + lines.length, 0),
       };
     }

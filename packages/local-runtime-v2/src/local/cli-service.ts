@@ -40,6 +40,8 @@ import type {
   SessionTokenUsageSummaryView,
   GetSessionRewindPreviewInput as GetSessionRewindPreviewReq,
   GetSessionRewindPreviewResult as GetSessionRewindPreviewResp,
+  InspectTurnContinuationInput as InspectTurnContinuationReq,
+  InspectTurnContinuationResult as InspectTurnContinuationResp,
   ListSessionInputSummariesInput as ListSessionInputSummariesReq,
   ListSessionInputSummariesResult as ListSessionInputSummariesResp,
   ListQueueMessagesInput as ListQueueMessagesReq,
@@ -90,6 +92,8 @@ import type {
   ConversationApplication,
   ConversationSendMessageRequest,
   ConversationSendOptions,
+  StartTurnContinuationReq,
+  StartTurnContinuationResp,
 } from "../application/conversation/conversation-application.js";
 import type { RuntimeApplications } from "../application/initialize.js";
 import type { LocalRuntimeApplication } from "../application/session/process-local-application-contract.js";
@@ -312,6 +316,27 @@ export class CliService {
     ctx: ProcessLocalContext = {},
   ): Promise<SteerSessionResp> {
     return this.options.conversation.steerSession(ctx, req);
+  }
+
+  /**
+   * Whether this Session's last Turn can be picked up again, and why not when it
+   * cannot. Exposed because a headless worker has to decide between starting a
+   * continuation Turn, waiting on the user, and giving up — and `sessions.status`
+   * is turn-level, so it cannot answer this.
+   */
+  inspectTurnContinuation(
+    req: InspectTurnContinuationReq,
+    ctx: ProcessLocalContext = {},
+  ): Promise<InspectTurnContinuationResp> {
+    return this.options.conversation.inspectTurnContinuation(ctx, req);
+  }
+
+  /** Starts the continuation Turn itself; see `ConversationApplication.startTurnContinuation`. */
+  startTurnContinuation(
+    req: StartTurnContinuationReq,
+    ctx: ProcessLocalContext = {},
+  ): Promise<StartTurnContinuationResp> {
+    return this.options.conversation.startTurnContinuation(ctx, req);
   }
 
   enqueueMessage(

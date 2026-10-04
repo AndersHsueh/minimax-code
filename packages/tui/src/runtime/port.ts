@@ -438,7 +438,32 @@ export interface TuiConversationPort {
   ): AsyncGenerator<TuiStreamEvent>;
   abortSession(req: AbortSessionReq): Promise<boolean>;
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult>;
+  inspectTurnContinuation(sessionId: string): Promise<TuiTurnContinuationState>;
+  continueTurn(sessionId: string): Promise<TuiContinueTurnOutcome>;
 }
+
+/**
+ * Whether this Session's last Turn left work that can be picked up again.
+ * - `unavailable`      nothing to continue (no interrupted Turn)
+ * - `available`        the model can be resumed
+ * - `running`          a Turn is already active in some process
+ * - `waiting-for-user` the Turn is parked on a question or permission request
+ */
+export type TuiTurnContinuationState =
+  | 'unavailable'
+  | 'available'
+  | 'running'
+  | 'waiting-for-user';
+
+export type TuiContinueTurnOutcome =
+  | { readonly continued: true; readonly turnId: string }
+  /**
+   * `active-turn`  a Turn is already running somewhere
+   * `unavailable`  the last Turn left nothing to pick up
+   * `waiting-for-user` the Turn is parked on a question or permission request
+   * anything else comes from Turn admission and is reported verbatim
+   */
+  | { readonly continued: false; readonly reason: string };
 
 export interface WatchTuiSessionTurnOptions {
   afterMsgId?: string;

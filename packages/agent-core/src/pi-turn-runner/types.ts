@@ -128,6 +128,15 @@ export type AbortSource =
    * into the Session's background work, which is expected to keep running.
    */
   | 'session_leave'
+  /**
+   * Handing a foreground conversation off to a background worker (supervisor
+   * daemon). A hand-off stops the live Turn, because a Turn runs inside the
+   * foreground process and cannot migrate to another process. It must NOT pause
+   * the Queue or the Goal — the worker exists to keep draining work the user
+   * already queued — and, like `session_leave`, it must not cascade into the
+   * Session's background work.
+   */
+  | 'background_handoff'
   | 'immediate_send'
   | 'input_safety'
   | 'output_safety'
@@ -138,6 +147,7 @@ export function normalizeAbortSource(value: unknown): AbortSource {
   switch (value) {
     case 'user_stop':
     case 'session_leave':
+    case 'background_handoff':
     case 'immediate_send':
     case 'input_safety':
     case 'output_safety':

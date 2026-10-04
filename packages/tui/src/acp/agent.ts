@@ -71,6 +71,13 @@ export interface CreateTuiAcpAgentOptions {
   readonly version: string;
   readonly createTurnId?: () => string;
   readonly runtimeEventProjectionTimeoutMs?: number;
+  /**
+   * Background-worker mode. Permission mode and the model are global settings
+   * backed by `<dataDir>/config.yaml`, so a worker that could write them would be
+   * able to widen every other session's permissions. In this mode the process
+   * takes its mode from `--permission-mode` and refuses configuration writes.
+   */
+  readonly worker?: boolean;
 }
 
 export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentApp {
@@ -954,6 +961,12 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.session.setConfigOption, async (context) => {
+    if (options.worker) {
+      throw acp.RequestError.invalidParams(
+        undefined,
+        'A background worker cannot change permission mode or model: both are global settings. Start the worker with --permission-mode / --model instead.',
+      );
+    }
     return runSessionLifecycle(context.params.sessionId, async (signal) => {
       assertLifecycleActive(signal);
       const { params } = context;

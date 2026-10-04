@@ -18,6 +18,8 @@ export const TUI_ACP_EXTENSION_METHODS = [
   'session/activate',
   'mcode/session/activate',
   'mcode/session/steer',
+  'mcode/session/continue',
+  'mcode/worker/activity',
   'mcode/session/queue/list',
   'mcode/session/queue/enqueue',
   'mcode/session/queue/update',
@@ -137,6 +139,45 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
       );
     }
     return { turnId: result.turnId, mode: result.mode };
+  });
+
+  // A background worker picking up a Turn a foreground process was cut off
+  // mid-flight. Refusals are reported, not raised: "parked on a permission
+  // question" and "nothing to continue" are different job states for the
+  // supervisor, and an opaque error would collapse them into a crash.
+  options.app.onRequest('mcode/session/continue', parseSessionRequest, async ({ params }) => {
+    resolve(params.sessionId);
+    const outcome = await options.runtime.continueTurn(params.sessionId);
+    return outcome.continued
+      ? { continued: true, turnId: outcome.turnId }
+      : { continued: false, reason: outcome.reason };
+  });
+
+  // The supervisor's idle-recovery input, answered by the worker that owns the
+  // data. A daemon must not open the runtime DB (§2.3), and it must never start a
+  // worker just to ask whether it is busy, so all eight §2.3 criteria have to
+  // arrive in one reply.
+  options.app.onRequest('mcode/worker/activity', parseSessionRequest, async ({ params }) => {
+    resolve(params.sessionId);
+    const [queue, run, goal, backgroundTasks] = await Promise.all([
+      options.runtime.getQueueSnapshot(params.sessionId),
+      options.runtime.getActiveRun(params.sessionId),
+      options.runtime.isGoalEnabled()
+        ? options.runtime.getGoal(params.sessionId)
+        : Promise.resolve(undefined),
+      options.runtime.listBackgroundTasks?.(params.sessionId) ?? Promise.resolve([]),
+    ]);
+    return {
+      activity: {
+        runState: run.state,
+        // `paused` is reported separately from the count: a paused queue is the
+        // user's own earlier decision and must be surfaced, never cleared.
+        queuePending: queue.pendingCount,
+        queuePaused: queue.paused,
+        goalActive: goal?.status === 'active',
+        backgroundTasks: backgroundTasks.length,
+      },
+    };
   });
 
   options.app.onRequest('mcode/session/queue/list', parseSessionRequest, async ({ params }) => {

@@ -52,6 +52,10 @@ export class ExecRunSupervisor {
       sendMessage: (request, signal) => this.sendMessage(request, signal),
       abortSession: (request) => this.runtime.abortSession(request),
       steer: (request) => this.runtime.steer(request),
+      // Exec never resumes an interrupted Turn; it exists so the port this returns
+      // stays a complete `TuiConversationPort` rather than a hand-picked subset.
+      inspectTurnContinuation: (sessionId) => this.runtime.inspectTurnContinuation(sessionId),
+      continueTurn: (sessionId) => this.runtime.continueTurn(sessionId),
     };
   }
 

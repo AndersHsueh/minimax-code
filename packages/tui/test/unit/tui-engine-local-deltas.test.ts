@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   CURSOR_MARKER,
@@ -50,6 +50,16 @@ class ClearToScrollbackTerminal extends RecordingVirtualTerminal {
   override write(data: string): void {
     super.write(data.replaceAll('\x1b[2J', `\x1b[${this.rows};1H${'\r\n'.repeat(this.rows)}\x1b[2J`));
   }
+}
+
+/**
+ * A key reaches the TUI through the host terminal, which scrolls back to the
+ * bottom before delivering it. Tests that call component handlers directly
+ * model that delivery explicitly (L047).
+ */
+function deliverUserKey(terminal: VirtualTerminal, tui: TuiMainScreen): void {
+  terminal.scrollLines(Number.MAX_SAFE_INTEGER);
+  (tui as unknown as { onUserInput(): void }).onUserInput();
 }
 
 class MutableLines implements Component {
@@ -143,6 +153,7 @@ describe('MCode Pi Engine local deltas', () => {
       await terminal.flush();
       terminal.scrollLines(-5);
       terminal.takeWrites();
+      deliverUserKey(terminal, tui);
       picker.handleInput(key);
       tui.renderNow();
       await terminal.flush();
@@ -349,6 +360,7 @@ describe('MCode Pi Engine local deltas', () => {
         tui.renderNow();
         await terminal.flush();
         parts[part].lines = [...baseline];
+        deliverUserKey(terminal, tui);
         tui.renderNow();
         await terminal.flush();
 
@@ -449,6 +461,7 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
       component.lines = [...history, 'composer', 'status'];
+      deliverUserKey(terminal, tui);
       tui.renderNow();
       await terminal.flush();
 
@@ -477,6 +490,7 @@ describe('MCode Pi Engine local deltas', () => {
       await terminal.flush();
       component.viewportLayoutKey = 'closed';
       component.lines = [...history, 'composer', 'status'];
+      deliverUserKey(terminal, tui);
       tui.renderNow();
       await terminal.flush();
 
@@ -804,6 +818,197 @@ describe('MCode Pi Engine local deltas', () => {
     } finally {
       tui.stop();
     }
+  });
+
+  // #426: ED 3 + replay leaves a scrolled-up xterm.js host at the top of the
+  // rebuilt history (it keeps its scrolled state), so reconstruction after an
+  // output-driven layout shrink waits for user input, when hosts return to the
+  // bottom (L047). Resize keeps its immediate replay after settling.
+  describe('scrolled-up readers during output-driven layout shrink (#426)', () => {
+    const started: TuiMainScreen[] = [];
+    afterEach(() => {
+      for (const tui of started.splice(0)) tui.stop();
+    });
+    const renderShrinkingTasks = async (terminal: RecordingVirtualTerminal) => {
+      const tui = new TuiMainScreen(terminal);
+      tui.start();
+      started.push(tui);
+      const parts = createMutableChatParts('conversation');
+      const history = Array.from({ length: 40 }, (_, index) => `History ${index}`);
+      parts.transcript.lines = history;
+      parts.tasks.lines = Array.from({ length: 6 }, (_, index) => `Task ${index}`);
+      const layout = new TuiChatLayout(terminal, parts);
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      return { tui, parts, history, layout };
+    };
+    const collapseTasks = async (
+      terminal: RecordingVirtualTerminal,
+      tui: TuiMainScreen,
+      parts: ReturnType<typeof createMutableChatParts>,
+    ) => {
+      parts.tasks.lines = [];
+      tui.renderNow();
+      await terminal.flush();
+    };
+    const logicalDocument = (layout: TuiChatLayout, terminal: RecordingVirtualTerminal) =>
+      layout.render(terminal.columns).map((line) => line.replace(CURSOR_MARKER, ''));
+
+    it('pads an output-driven layout shrink and reconstructs after the next key', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, history, layout } = await renderShrinkingTasks(terminal);
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      expect(before.viewport).toBeGreaterThan(0);
+      terminal.takeWrites();
+
+      // Background tasks finish without user input while the reader is scrolled up.
+      await collapseTasks(terminal, tui, parts);
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.getScrollPosition()).toEqual(before);
+      for (const line of history) {
+        expect(terminal.getScrollBuffer().filter((row) => row.trim() === line)).toHaveLength(1);
+      }
+
+      deliverUserKey(terminal, tui);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getViewport()).toEqual(logicalDocument(layout, terminal).slice(-terminal.rows));
+      expect(terminal.getScrollBuffer()).toEqual(logicalDocument(layout, terminal));
+    });
+
+    it('keeps a tailing reader at the bottom when output ends and the task list collapses', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, history, layout } = await renderShrinkingTasks(terminal);
+      expect(terminal.getScrollPosition().viewport).toBe(terminal.getScrollPosition().bottom);
+      terminal.takeWrites();
+
+      // The reply finishes streaming, then the task list collapses, with no input.
+      parts.transcript.lines = [...history, 'Final answer line'];
+      tui.renderNow();
+      await terminal.flush();
+      await collapseTasks(terminal, tui, parts);
+
+      const position = terminal.getScrollPosition();
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(position.viewport).not.toBe(0);
+      expect(position.viewport).toBe(position.bottom);
+      expect(terminal.getViewport().slice(-2).map((row) => row.trim())).toEqual(['composer', 'status']);
+      expect(terminal.getViewport().some((row) => row.trim() === 'Final answer line')).toBe(true);
+      for (const line of [...history, 'Final answer line']) {
+        expect(terminal.getScrollBuffer().filter((row) => row.trim() === line)).toHaveLength(1);
+      }
+
+      // The next key restores the complete viewport without leaving the bottom.
+      deliverUserKey(terminal, tui);
+      tui.renderNow();
+      await terminal.flush();
+      const after = terminal.getScrollPosition();
+      expect(after.viewport).toBe(after.bottom);
+      expect(terminal.getScrollBuffer()).toEqual(logicalDocument(layout, terminal));
+    });
+
+    it('reconstructs immediately when the shrink follows recent user input', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      terminal.takeWrites();
+      deliverUserKey(terminal, tui);
+      await collapseTasks(terminal, tui, parts);
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer()).toEqual(logicalDocument(layout, terminal));
+    });
+
+    it('keeps the immediate history replay after a resize settles', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      component.lines = [...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`), `composer${CURSOR_MARKER}`];
+      tui.addChild(component);
+      try {
+        tui.start();
+        tui.renderNow();
+        await terminal.flush();
+        terminal.takeWrites();
+        terminal.resize(59, 30);
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.takeWrites()).toContain('\x1b[3J');
+        expect(terminal.getScrollBuffer()).toEqual([
+          ...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`),
+          'composer',
+        ]);
+      } finally {
+        tui.stop();
+      }
+    });
+
+    it.each([
+      ['focus in', '\x1b[I'],
+      ['focus out', '\x1b[O'],
+      ['window size report', '\x1b[8;16;60t'],
+      ['cursor position report', '\x1b[12;40R'],
+      ['extended cursor position report', '\x1b[?12;40;1R'],
+      ['kitty keyboard flags', '\x1b[?1u'],
+      ['device attributes', '\x1b[?62;22c'],
+      ['device status', '\x1b[?997;1n'],
+      ['mode report', '\x1b[?2026;2$y'],
+      ['kitty key release', '\x1b[97;1:3u'],
+      ['mixed reports in one chunk', '\x1b[I\x1b[12;40R\x1b[?62;22c\x1bP>|xterm(1)\x1b\\\x1b[O'],
+    ])('does not treat a %s as user input', async (_name, report) => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts } = await renderShrinkingTasks(terminal);
+      terminal.scrollLines(-12);
+      await collapseTasks(terminal, tui, parts);
+      terminal.takeWrites();
+      const before = terminal.getScrollPosition();
+
+      terminal.sendInput(report);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.getScrollPosition()).toEqual(before);
+    });
+
+    it.each([
+      ['a key after a cursor position report', '\x1b[12;40Rx'],
+      ['a key between reports', '\x1b[I\x1b[?62;22cx\x1b[12;40R'],
+      ['an arrow key after a focus report', '\x1b[I\x1b[A'],
+      ['a paste after a report', '\x1b[12;40R\x1b[200~pasted\x1b[201~'],
+      ['Escape', '\x1b'],
+    ])('treats %s as user input', async (_name, chunk) => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      terminal.scrollLines(-12);
+      await collapseTasks(terminal, tui, parts);
+      terminal.takeWrites();
+
+      terminal.scrollLines(Number.MAX_SAFE_INTEGER);
+      terminal.sendInput(chunk);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer()).toEqual(logicalDocument(layout, terminal));
+    });
+
+    it('replays deferred history before stopping', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      started.splice(started.indexOf(tui), 1);
+      terminal.scrollLines(-12);
+      await collapseTasks(terminal, tui, parts);
+      terminal.takeWrites();
+      const expected = logicalDocument(layout, terminal);
+
+      tui.stop();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer().slice(0, expected.length).map((line) => line.trimEnd())).toEqual(
+        expected.map((line) => line.trimEnd()),
+      );
+    });
   });
 
   it('renders an urgent product interaction without resetting Main diff state', async () => {

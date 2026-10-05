@@ -12,6 +12,7 @@ import {
   type TuiInteractiveLaunchRequest,
 } from './contract.js';
 import type { McodeProviderCliRequest } from './provider-command.js';
+import { prepareTuiDataDir } from '../runtime/data-dir.js';
 import {
   isModelProviderApiFormat,
   MCODE_PROVIDER_API_FORMATS,
@@ -124,6 +125,70 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
         ? requireAcpRunner(options)(activeLane, commandOptions)
         : requireAcpRunner(options)(undefined, commandOptions),
     );
+
+  const daemon = program.command('daemon').description('Manage the background session supervisor');
+
+  daemon
+    .command('run', { hidden: true })
+    .description('Run the supervisor in the foreground (spawned detached by clients)')
+    .option('--permission-mode <mode>', 'permission mode for jobs this daemon starts')
+    .allowExcessArguments(false)
+    .action(async (commandOptions: { permissionMode?: string }) => {
+      const { runDaemonCommand } = await import('../daemon/command.js');
+      const handle = runDaemonCommand(
+        'run',
+        {
+          dataDir: await prepareTuiDataDir(),
+          ...(commandOptions.permissionMode ? { permissionMode: commandOptions.permissionMode } : {}),
+          exit: (code) => {
+            process.exitCode = code;
+          },
+        },
+        { version: options.version },
+      );
+      await handle.started;
+      await handle.done;
+    });
+
+  daemon
+    .command('status')
+    .description('Report whether a supervisor is running for this data directory')
+    .allowExcessArguments(false)
+    .action(async () => {
+      const { runDaemonCommand } = await import('../daemon/command.js');
+      const report = await runDaemonCommand(
+        'status',
+        { dataDir: await prepareTuiDataDir() },
+        { version: options.version },
+      );
+      if (report.running) {
+        process.stdout.write(
+          `daemon running  epoch ${report.epoch}  version ${report.daemonVersion}  workers ${report.workers}\n  ${report.socketFile}\n`,
+        );
+        return;
+      }
+      process.stdout.write(`daemon not running (${report.reason})\n`);
+    });
+
+  daemon
+    .command('stop')
+    .description('Stop the supervisor for this data directory')
+    .option('--drain', 'wait for every job to go idle before stopping')
+    .allowExcessArguments(false)
+    .action(async (commandOptions: { drain?: boolean }) => {
+      const { runDaemonCommand } = await import('../daemon/command.js');
+      const report = await runDaemonCommand(
+        'stop',
+        { dataDir: await prepareTuiDataDir(), ...(commandOptions.drain ? { drain: true } : {}) },
+        { version: options.version },
+      );
+      if (report.stopped) {
+        process.stdout.write('daemon stopped\n');
+        return;
+      }
+      process.stdout.write(`daemon not stopped (${report.reason})\n`);
+      process.exitCode = 1;
+    });
 
   acp
     .command('login')

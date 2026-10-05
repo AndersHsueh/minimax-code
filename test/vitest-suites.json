@@ -223,10 +223,9 @@
       "test-case/phase2-daemon-job-store.test.ts",
       "test-case/phase2-daemon-server.test.ts",
       "test-case/phase2-daemon-command.test.ts",
-      "test-case/phase3-worker-state.test.ts",
-      "test-case/phase3-worker-recovery.test.ts",
-      "test-case/phase3-worker-host.test.ts",
-      "test-case/phase3-job-methods.test.ts"
+      "test-case/phase3-job-methods.test.ts",
+      "test-case/phase4-background-handoff.test.ts",
+      "test-case/phase4-agent-view.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

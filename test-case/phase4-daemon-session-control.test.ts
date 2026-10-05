@@ -10,10 +10,7 @@ import { routeJobMethod, type DaemonJobMethods } from '../packages/tui/src/daemo
 /**
  * Phase 4 contract: the session-control methods a foreground TUI calls.
  *
- * `backgroundSession` (Phase 4a) is the *decision* — refuse a non-empty
- * composer, make sure a supervisor exists before ending a Turn, abort with
- * `background_handoff`, wait for the Turn to settle. It is pure and injected.
- * These are the three methods that decision actually calls, and each one is a
+ * These are the three methods that a hand-off decision calls, and each one is a
  * place where a plausible-looking implementation loses work:
  *
  *  - **`job.adopt` must not start a worker for an idle hand-off.** The process is

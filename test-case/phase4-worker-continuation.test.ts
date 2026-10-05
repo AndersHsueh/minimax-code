@@ -8,8 +8,8 @@ import {
 } from '../packages/tui/src/daemon/worker-host.js';
 
 /**
- * Phase 4 acceptance: a live session backgrounded with `←` finishes its work
- * inside the worker.
+ * Phase 4 acceptance: a session whose job records an interrupted Turn finishes
+ * that work inside the worker.
  *
  * This is the scenario the whole design exists for, and it has one link that
  * is easy to leave out. The Turn cannot be moved — it has to be ended in the

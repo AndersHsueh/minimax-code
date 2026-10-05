@@ -48,8 +48,6 @@ export interface TuiInputFlowOptions {
   readonly restoreWaitingMessage: () => Promise<boolean>;
   readonly openQueueManager: () => void;
   readonly toggleTasks: () => void;
-  /** §2.1 hand-off, bound to `←` on an empty Composer. */
-  readonly backgroundSession?: () => void;
   readonly isStopped: () => boolean;
   readonly abortLiveTurn: () => Promise<boolean>;
   readonly cancelSessionEdit?: () => boolean;
@@ -379,16 +377,6 @@ export class TuiInputFlow {
         busyAction: keyAction === 'submit-guidance' ? 'steer' : 'queue',
       };
       if (!this.options.editor.submit()) this.nextBusySubmission = undefined;
-      return { consume: true };
-    }
-    if (keyAction === 'background-session') {
-      // No fallback handler: a TUI built without a supervisor has nothing to
-      // hand off to, and swallowing the key would look identical to a bug.
-      if (!this.options.backgroundSession) {
-        this.options.setHint('Background sessions are unavailable in this build.', 'warning');
-        return { consume: true };
-      }
-      this.options.backgroundSession();
       return { consume: true };
     }
     if (keyAction === 'restore-waiting') {

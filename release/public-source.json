@@ -3478,6 +3478,7 @@
     "test-case/phase4-daemon-session-control.test.ts",
     "test-case/phase4-exit-impact.test.ts",
     "test-case/phase4-turn-settlement.test.ts",
+    "test-case/phase4-worker-continuation.test.ts",
     "test/byok.test.mjs",
     "test/executable-resolution.test.ts",
     "test/history-processing.test.ts",

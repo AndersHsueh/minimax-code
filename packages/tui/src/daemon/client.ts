@@ -106,9 +106,22 @@ export async function connectDaemon(options: ConnectDaemonOptions): Promise<Daem
     failAll(new DaemonClientError(DAEMON_ERROR_CODES.internal, 'The daemon closed the connection.'));
   });
   socket.on('error', (error) => failAll(error));
-  if (options.idleTimeoutMs) {
-    socket.setTimeout(options.idleTimeoutMs, () => socket.destroy());
-  }
+
+  // Idle means *no work in flight*, not "no bytes for N seconds".
+  //
+  // A request like `job.send` can legitimately take longer than the timeout — it
+  // may start a worker, load its session, and only then answer. Treating that as
+  // idle reports a daemon that is working perfectly as one that closed the
+  // connection, and throws away the delivery answer with it.
+  let inFlight = 0;
+  const armIdleTimer = (): void => {
+    const limit = options.idleTimeoutMs;
+    if (limit === undefined) return;
+    socket.setTimeout(inFlight > 0 ? 0 : limit, () => {
+      if (inFlight === 0) socket.destroy();
+    });
+  };
+  armIdleTimer();
 
   const client: DaemonClient = {
     request: (method, params) =>
@@ -118,7 +131,25 @@ export async function connectDaemon(options: ConnectDaemonOptions): Promise<Daem
           return;
         }
         const id = nextId++;
-        pending.set(id, { resolve, reject });
+        inFlight += 1;
+        armIdleTimer();
+        let settled = false;
+        const settle = (): void => {
+          if (settled) return;
+          settled = true;
+          inFlight = Math.max(0, inFlight - 1);
+          armIdleTimer();
+        };
+        pending.set(id, {
+          resolve: (value) => {
+            settle();
+            resolve(value);
+          },
+          reject: (error) => {
+            settle();
+            reject(error);
+          },
+        });
         socket.write(
           serializeFrame({
             jsonrpc: '2.0',

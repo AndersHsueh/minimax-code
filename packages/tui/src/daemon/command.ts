@@ -1,3 +1,5 @@
+import { createJobStore, type DaemonJobStore } from './job-store.js';
+import { routeJobMethod, type DaemonJobMethods } from './job-methods.js';
 import { createCapabilityFile, readCapabilityFile } from './capability.js';
 import { connectDaemon, type DaemonClient } from './client.js';
 import { daemonPaths } from './paths.js';
@@ -15,6 +17,8 @@ const PERMISSION_MODES = ['default', 'auto', 'bypassPermissions', 'off'] as cons
 
 export interface DaemonCommandOptions {
   readonly dataDir: string;
+  /** Live worker hosts by session id. Injected so tests can supply fakes. */
+  readonly workers?: Map<string, WorkerHostLike>;
   readonly permissionMode?: string;
   readonly drain?: boolean;
   /** Injected so tests can observe the exit path without ending the process. */
@@ -125,12 +129,23 @@ function runDaemon(
       return { acquired: false, socketFile: paths.socketFile };
     }
     const token = await createCapabilityFile(paths.capabilityFile);
+    const jobs = createJobStore({ dataDir: options.dataDir });
+    const workers = options.workers ?? new Map<string, WorkerHostLike>();
+    const methods = createJobMethods(jobs, workers);
     const server = await startDaemonServer({
       dataDir: options.dataDir,
       token,
       version: dependencies.version,
       epoch: (dependencies.now ?? Date.now)(),
       onStop: () => stopServer?.(),
+      countWorkers: () => workers.size,
+      handlers: Object.fromEntries(
+        JOB_METHODS.map((method) => [
+          method,
+          (params: unknown, client: { kind: string }) =>
+            routeJobMethod(methods, method, params, client),
+        ]),
+      ),
     });
     stopServer = async () => {
       if (stopped) return;
@@ -242,8 +257,65 @@ async function daemonStop(
   }
 }
 
-async function probeIncumbent(
-  paths: ReturnType<typeof daemonPaths>,
+/** The slice of a worker host the job methods need. */
+export interface WorkerHostLike {
+  send(input: { sessionId: string; text: string; mode: 'queue' | 'steer' }): Promise<unknown>;
+  stop(input: { sessionId: string }): Promise<unknown>;
+  remove?(input: { sessionId: string }): Promise<unknown>;
+  reply?(
+    input: { sessionId: string; interactionId: string; outcome: string },
+  ): Promise<unknown>;
+}
+
+/** The §3.5 job methods a CLI or TUI client can call. */
+export const JOB_METHODS = [
+  'jobs.list',
+  'job.send',
+  'job.stop',
+  'job.remove',
+  'job.reply',
+] as const;
+
+const ENDED_JOB_STATES = new Set(['completed', 'failed', 'stopped']);
+
+function createJobMethods(
+  jobs: DaemonJobStore,
+  workers: Map<string, WorkerHostLike>,
+): DaemonJobMethods {
+  return {
+    jobs,
+    listJobs: async (input) => {
+      const rows: Record<string, unknown>[] = [];
+      for (const sessionId of await jobs.listJobs()) {
+        const job = await jobs.readJob(sessionId);
+        if (!job) continue;
+        if (!input.includeEnded && ENDED_JOB_STATES.has(String(job.state ?? 'idle'))) continue;
+        rows.push({ ...job, sessionId });
+      }
+      return rows;
+    },
+    // No live worker is the normal case, not an error: the process is a cache.
+    // The throw routes into the staging path, which persists the message in order.
+    send: async (input) => {
+      const worker = workers.get(input.sessionId);
+      if (!worker) throw new Error('No worker is running for this session.');
+      return worker.send(input);
+    },
+    stop: async (input) => {
+      const worker = workers.get(input.sessionId);
+      if (!worker) throw new Error('No worker is running for this session.');
+      return worker.stop(input);
+    },
+    remove: async () => ({ removed: true }),
+    reply: async (input) => {
+      const worker = workers.get(input.sessionId);
+      if (!worker?.reply) return { rejected: 'unknown-interaction' as const };
+      return (await worker.reply(input)) as { rejected: 'rejected' };
+    },
+  };
+}
+
+async function probeIncumbent(  paths: ReturnType<typeof daemonPaths>,
   version: string,
 ): Promise<string> {
   let token: string;

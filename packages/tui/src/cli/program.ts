@@ -190,6 +190,75 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       process.exitCode = 1;
     });
 
+  program
+    .command('agents')
+    .description('List background sessions and what they are doing')
+    .option('--json', 'emit machine-readable JSON')
+    .option('--all', 'include sessions that have already finished')
+    .allowExcessArguments(false)
+    .action(async (commandOptions: { json?: boolean; all?: boolean }) => {
+      const { buildAgentsReport } = await import('../daemon/agents-cli.js');
+      const { runAgentClientQuery } = await import('../daemon/agent-client.js');
+      const query = await runAgentClientQuery({
+        dataDir: await prepareTuiDataDir(),
+        version: options.version,
+        includeEnded: commandOptions.all === true,
+      });
+      if (!query.ok) {
+        // A non-zero exit: a script asking "is anything running?" needs to tell
+        // "the supervisor is down" apart from "everything finished".
+        process.stderr.write(`cannot list background agents: ${query.reason}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(buildAgentsReport(query.rows, commandOptions.json === true));
+    });
+
+  program
+    .command('send')
+    .description('Send a message to a background session')
+    .argument('<session-id>')
+    .argument('<message...>')
+    .allowExcessArguments(false)
+    .action(async (sessionId: string, message: string[]) => {
+      const { parseSendRequest } = await import('../daemon/agents-cli.js');
+      const { runAgentClientCommand } = await import('../daemon/agent-client.js');
+      const request = parseSendRequest([sessionId, ...message]);
+      const report = await runAgentClientCommand({
+        dataDir: await prepareTuiDataDir(),
+        version: options.version,
+        method: 'job.send',
+        params: { sessionId: request.sessionId, text: request.text, mode: 'queue' },
+      });
+      if ('rejected' in report) {
+        process.stdout.write(`send refused: ${report.rejected}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write('sent\n');
+    });
+
+  program
+    .command('stop')
+    .description('Stop the current Turn of a background session')
+    .argument('<session-id>')
+    .allowExcessArguments(false)
+    .action(async (sessionId: string) => {
+      const { runAgentClientCommand } = await import('../daemon/agent-client.js');
+      const report = await runAgentClientCommand({
+        dataDir: await prepareTuiDataDir(),
+        version: options.version,
+        method: 'job.stop',
+        params: { sessionId },
+      });
+      if ('rejected' in report) {
+        process.stdout.write(`stop refused: ${report.rejected}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write('stopped\n');
+    });
+
   acp
     .command('login')
     .description('Sign in to use MiniMax Code Agent features')

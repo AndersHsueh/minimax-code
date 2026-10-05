@@ -1,4 +1,6 @@
 import type {
+  TuiActiveRunControlPort,
+  TuiBackgroundTaskCapability,
   TuiConfigurationPort,
   TuiConversationPort,
   TuiDelegationPort,
@@ -23,4 +25,6 @@ export type TuiAcpRuntime = TuiSessionPort &
   TuiQueuePort &
   TuiGoalPort &
   TuiDelegationPort &
-  TuiSessionForkPort;
+  TuiSessionForkPort &
+  TuiActiveRunControlPort &
+  TuiBackgroundTaskCapability;

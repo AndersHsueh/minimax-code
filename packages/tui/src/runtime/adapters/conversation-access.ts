@@ -10,7 +10,11 @@ import type {
 } from '@mavis/local-runtime-v2/cli-service';
 
 import { TuiFailure } from '../../failure.js';
-import type { TuiConversationPort } from '../port.js';
+import type {
+  TuiContinueTurnOutcome,
+  TuiConversationPort,
+  TuiTurnContinuationState,
+} from '../port.js';
 import { projectTuiSessionStreamFrame, type TuiStreamEvent } from '../stream-events.js';
 
 export class TuiConversationAccess implements TuiConversationPort {
@@ -82,7 +86,26 @@ export class TuiConversationAccess implements TuiConversationPort {
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult> {
     return this.service.steer(input);
   }
+
+  async inspectTurnContinuation(sessionId: string): Promise<TuiTurnContinuationState> {
+    const { state } = await this.service.inspectTurnContinuation({ id: sessionId });
+    return TUI_TURN_CONTINUATION_STATES[state] ?? 'unavailable';
+  }
+
+  async continueTurn(sessionId: string): Promise<TuiContinueTurnOutcome> {
+    const result = await this.service.startTurnContinuation({ id: sessionId });
+    if (result.accepted) return { continued: true, turnId: result.turnId };
+    return { continued: false, reason: result.reason };
+  }
 }
+
+/** `@mavis/protocol/local` models these as a numeric enum for process boundaries. */
+const TUI_TURN_CONTINUATION_STATES: readonly TuiTurnContinuationState[] = [
+  'unavailable',
+  'available',
+  'running',
+  'waiting-for-user',
+];
 
 async function* asAsyncFrames(
   source: AsyncIterable<SessionStreamFrameView> | Iterable<SessionStreamFrameView>,

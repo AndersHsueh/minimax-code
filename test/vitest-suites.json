@@ -212,7 +212,11 @@
       "packages/local-runtime-v2/src/service/turn-system/execution/turn-execution.service.test.ts",
       "packages/local-runtime-v2/test/integration/session-stop-cascade.integration.test.ts",
       "packages/local-runtime/test/unit/local-background-task-user-stop-cascade.test.ts",
-      "packages/local-runtime/test/unit/local-task-append.test.ts"
+      "packages/local-runtime/test/unit/local-task-append.test.ts",
+      "test-case/phase1-background-handoff.test.ts",
+      "test-case/phase1-background-handoff-effects.test.ts",
+      "test-case/phase1-session-continue.test.ts",
+      "test-case/phase1-acp-worker-surface.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

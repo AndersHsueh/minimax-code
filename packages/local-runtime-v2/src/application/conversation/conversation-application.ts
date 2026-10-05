@@ -123,6 +123,25 @@ export interface ConversationApplicationOptions {
   readonly metrics?: ApplicationMetricsClient;
 }
 
+/**
+ * Why a continuation Turn was refused. `active-turn` means one is already running;
+ * the rest come from Turn admission and are passed through verbatim, because a
+ * caller that flattens "already running" and "rejected by admission policy" into
+ * one state cannot tell a busy job from a broken one.
+ */
+export type StartTurnContinuationReason = Extract<
+  Awaited<ReturnType<TurnContinuationDelivery["open"]>>,
+  { readonly accepted: false }
+>["reason"];
+
+export type StartTurnContinuationReq = {
+  readonly id: string;
+};
+
+export type StartTurnContinuationResp =
+  | { readonly accepted: true; readonly turnId: string }
+  | { readonly accepted: false; readonly reason: StartTurnContinuationReason };
+
 /** Owns the conversation use cases migrated from SessionController. */
 export class ConversationApplication {
   constructor(private readonly options: ConversationApplicationOptions) {}
@@ -339,6 +358,30 @@ export class ConversationApplication {
       );
     }
     return mapV2TurnStreamResult(await this.options.continuation.open(req.id));
+  }
+
+  /**
+   * Continuation admission for a headless caller that drives the Turn itself.
+   *
+   * {@link continueTurn} streams the same Turn, which is the wrong shape for a
+   * background worker: it has no TUI to render into and needs the Turn id to
+   * watch. Both read the same {@link TurnContinuationDelivery}, so the admission
+   * rules — an already running Turn, a Turn parked on a question, a history with
+   * nothing to pick up — cannot drift between the streaming and headless paths.
+   */
+  async startTurnContinuation(
+    _ctx: ProcessLocalContext,
+    req: StartTurnContinuationReq,
+  ): Promise<StartTurnContinuationResp> {
+    if (!(await this.options.sessionReader.find(req.id))) {
+      throw sessionNotFound(req.id);
+    }
+    const result = await this.options.continuation.open(req.id);
+    if (!result.accepted) return { accepted: false, reason: result.reason };
+    // The Turn settles on its own; these frames exist only to render it live, so
+    // drain them rather than leaving the reservation open and buffering.
+    void drainSessionFrames(result.frames);
+    return { accepted: true, turnId: result.turnId };
   }
 
   async abortSession(
@@ -1042,6 +1085,19 @@ function sessionNotFound(sessionId: string): ApplicationError {
     "local_session_not_found",
     `Session not found: ${sessionId}`,
   );
+}
+
+/** Consumes a live-render frame stream a headless caller will never read. */
+async function drainSessionFrames(
+  frames: AsyncIterableIterator<SessionFrame>,
+): Promise<void> {
+  try {
+    for await (const _frame of frames) {
+      // Intentionally empty: the frames are a rendering sidecar.
+    }
+  } catch {
+    // The Turn itself settles independently; a failed drain cannot fail it.
+  }
 }
 
 function enqueueApplicationError(error: unknown): unknown {

@@ -16,6 +16,7 @@ const skipped = new Set([
   ".pnpm-store",
   ".turbo",
   ".DS_Store",
+  "mydocs",
 ]);
 function filesIn(directory, prefix = "") {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

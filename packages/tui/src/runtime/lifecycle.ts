@@ -26,6 +26,7 @@ import {
 } from './embedded-host.js';
 import { createTuiRuntimeLogging, type TuiRuntimeLogging } from './logging.js';
 import { TuiRuntimeAdapter } from './adapter.js';
+import type { TuiSessionModelSelection } from './port.js';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
@@ -81,6 +82,9 @@ export interface CreateTuiRuntimeOptions {
   surface?: TuiObservabilitySurface;
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
+  /** Model a headless worker pins for every Session it creates. `undefined` keeps
+   *  the user's saved global selection, which is what an interactive launch wants. */
+  initialModelSelection?: TuiSessionModelSelection;
   lane?: string;
 }
 
@@ -494,6 +498,9 @@ export async function createTuiRuntime(
       host,
       adapter: new TuiRuntimeAdapter(host.cliService, {
         workspaceDir: options.workspaceDir,
+        ...(options.initialModelSelection
+          ? { initialModelSelection: options.initialModelSelection }
+          : {}),
         observability,
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)

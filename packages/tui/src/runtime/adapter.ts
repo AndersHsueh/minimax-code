@@ -29,6 +29,7 @@ import type {
   TuiActiveRunSnapshot,
   TuiBackgroundTask,
   TuiCompactionResult,
+  TuiContinueTurnOutcome,
   TuiDelegationSnapshot,
   TuiDelegationStopReceipt,
   TuiFeedbackPreview,
@@ -60,9 +61,11 @@ import type {
   TuiSessionForkResult,
   TuiSessionInputSummary,
   TuiSessionMcpServer,
+  TuiSessionModelSelection,
   TuiSessionPage,
   TuiSessionUsage,
   TuiSkillList,
+  TuiTurnContinuationState,
   TuiRuntime,
   TuiWorkspaceFileCandidate,
   TuiWorkspaceFileEntry,
@@ -84,6 +87,9 @@ export interface TuiRuntimeAdapterOptions {
   defaultAgentName?: string;
   onSessionDeleted?: (sessionId: string) => void | Promise<void>;
   workspaceDir?: string;
+  /** Model pinned for every Session this adapter creates; `undefined` inherits the
+   *  saved global selection. Set by headless launches that must not drift. */
+  initialModelSelection?: TuiSessionModelSelection;
   synchronizeAuth?: () => Promise<void>;
   accountIdentityGetter?: () => TuiAccountStatus["identity"];
   observability?: TuiObservability;
@@ -116,6 +122,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   private readonly eventAccess: TuiEventAccess;
   private readonly delegationAccess: TuiDelegationAccess;
   private readonly conversationAccess: TuiConversationAccess;
+  private readonly initialModelSelection: TuiSessionModelSelection | undefined;
   private readonly pluginAccess: TuiPluginAccess;
   private readonly goalAccess: TuiGoalAccess;
   private readonly tokenPlanAccountStatusGetter:
@@ -138,6 +145,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.feedback = options.feedback;
     this.dailyCheckin = options.dailyCheckin;
     this.conversationAccess = new TuiConversationAccess(cliService);
+    this.initialModelSelection = options.initialModelSelection;
     this.pluginAccess = new TuiPluginAccess(cliService);
     this.context = new TuiRuntimeAccessContext({
       cliService,
@@ -184,7 +192,24 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     return this.conversationAccess.steer(input);
   }
 
+  inspectTurnContinuation(sessionId: string): Promise<TuiTurnContinuationState> {
+    return this.conversationAccess.inspectTurnContinuation(sessionId);
+  }
+
+  continueTurn(sessionId: string): Promise<TuiContinueTurnOutcome> {
+    return this.conversationAccess.continueTurn(sessionId);
+  }
+
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
+    const pinned = this.initialModelSelection;
+    if (pinned?.providerId && pinned.modelId) {
+      return this.sessionAccess.createSession(input, {
+        providerId: pinned.providerId,
+        modelId: pinned.modelId,
+        ...(pinned.variant !== undefined ? { variant: pinned.variant } : {}),
+        ...(pinned.thinking?.effort ? { thinking: { effort: pinned.thinking.effort } } : {}),
+      });
+    }
     const defaultModel = await this.productAccess
       .listModels()
       .then((models) => models.find((model) => model.selected === true))

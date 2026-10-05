@@ -260,9 +260,13 @@ async function defaultRunExec(
   await runTuiExecCommand(prompt, options, version);
 }
 
-async function defaultRunAcp(version: string, lane?: string): Promise<void> {
+async function defaultRunAcp(
+  version: string,
+  lane?: string,
+  options: import('./run-acp-command.js').RawTuiAcpOptions = {},
+): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
-  await runTuiAcpCommand(version, {}, lane);
+  await runTuiAcpCommand(version, {}, lane, options);
 }
 
 async function defaultRunLogin(

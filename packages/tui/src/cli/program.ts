@@ -1,6 +1,7 @@
 import { Command, InvalidArgumentError } from 'commander';
 import type { MavisRegion } from '@mavis/config';
 import { TuiContributionRegistry } from '../contributions/index.js';
+import type { RawTuiAcpOptions } from './run-acp-command.js';
 import type { RawTuiExecOptions } from '../headless/invocation.js';
 import {
   applyExecCliContract,
@@ -37,7 +38,7 @@ export interface CreateTuiProgramOptions {
     commandOptions: RawTuiExecOptions,
     lane?: string,
   ) => Promise<void>;
-  runAcp?: (lane?: string) => Promise<void>;
+  runAcp?: (lane?: string, options?: RawTuiAcpOptions) => Promise<void>;
   runLogin: (region?: MavisRegion, openBrowser?: boolean, lane?: string) => Promise<void>;
   runLogout: (region?: MavisRegion) => Promise<void>;
   runUpdate: () => Promise<void>;
@@ -107,9 +108,21 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
   const acp = program
     .command('acp')
     .description('Run MiniMax Code as an Agent Client Protocol server over stdio')
+    .option(
+      '--permission-mode <mode>',
+      'pin the permission mode for this process instead of reading the global setting',
+    )
+    .option('--model <provider/model>', 'model to use, as `provider/model` or `provider/model#variant`')
+    .option('--effort <effort>', 'reasoning effort for --model')
+    .option(
+      '--worker',
+      'run as a background worker: refuse to write global permission or model configuration',
+    )
     .allowExcessArguments(false)
-    .action(() =>
-      activeLane ? requireAcpRunner(options)(activeLane) : requireAcpRunner(options)(),
+    .action((commandOptions: RawTuiAcpOptions) =>
+      activeLane
+        ? requireAcpRunner(options)(activeLane, commandOptions)
+        : requireAcpRunner(options)(undefined, commandOptions),
     );
 
   acp

@@ -233,7 +233,10 @@
       "test-case/phase4-daemon-push.test.ts",
       "test-case/phase4-turn-settlement.test.ts",
       "test-case/phase4-background-keybinding.test.ts",
-      "test-case/phase4-background-flow.test.ts"
+      "test-case/phase4-background-flow.test.ts",
+      "test-case/phase4-agent-view-panel.test.ts",
+      "test-case/phase4-attach.test.ts",
+      "test-case/phase4-awaiting-badge.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

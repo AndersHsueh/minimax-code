@@ -216,7 +216,13 @@
       "test-case/phase1-background-handoff.test.ts",
       "test-case/phase1-background-handoff-effects.test.ts",
       "test-case/phase1-session-continue.test.ts",
-      "test-case/phase1-acp-worker-surface.test.ts"
+      "test-case/phase1-acp-worker-surface.test.ts",
+      "test-case/phase2-daemon-paths.test.ts",
+      "test-case/phase2-daemon-capability.test.ts",
+      "test-case/phase2-daemon-singleton.test.ts",
+      "test-case/phase2-daemon-job-store.test.ts",
+      "test-case/phase2-daemon-server.test.ts",
+      "test-case/phase2-daemon-command.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

@@ -44,6 +44,17 @@ export interface RunningDaemon {
   readonly socketFile: string;
   readonly socketIsFallback: boolean;
   readonly epoch: number;
+  /**
+   * Pushes a server-initiated frame to every connected client.
+   *
+   * The agent view's footer badge is specified as a subscription, not a poll
+   * (§3.5). A badge that refreshes on an interval is wrong for up to one
+   * interval, and the moment it matters is a job parked on a permission
+   * question the user is not currently looking at.
+   */
+  broadcast(method: string, params?: unknown): void;
+  /** Connected peers, used by tests and by `daemon.status` diagnostics. */
+  subscriberCount(): number;
   stop(): Promise<void>;
 }
 
@@ -211,6 +222,16 @@ export async function startDaemonServer(
     socketFile: paths.socketFile,
     socketIsFallback: paths.socketIsFallback,
     epoch: options.epoch,
+    broadcast: (method, params) => {
+      // Skips sockets the kernel already knows are gone. Without the guard a
+      // push to a TUI that was `kill -9`ed accumulates write callbacks on a
+      // dead handle, and the daemon leaks one pending write per broadcast.
+      for (const socket of connections) {
+        if (socket.destroyed || socket.writableEnded) continue;
+        send(socket, { jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) });
+      }
+    },
+    subscriberCount: () => connections.size,
     stop: async () => {
       if (stopping) return;
       stopping = true;

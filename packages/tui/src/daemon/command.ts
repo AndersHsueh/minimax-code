@@ -21,6 +21,17 @@ export interface DaemonCommandOptions {
   readonly workers?: Map<string, WorkerHostLike>;
   readonly permissionMode?: string;
   readonly drain?: boolean;
+  /**
+   * Starts a worker for an adopted job.
+   *
+   * Injected rather than constructed here so this module owns no process
+   * lifecycle: `mcode daemon run` in Phase 3 kept a map of live hosts, and the
+   * hand-off needs the opposite — start nothing until there is work.
+   */
+  readonly startWorker?: (input: {
+    sessionId: string;
+    job: Record<string, unknown>;
+  }) => Promise<boolean>;
   /** Injected so tests can observe the exit path without ending the process. */
   readonly exit?: (code: number) => Promise<void> | void;
   readonly report?: DaemonCommandReport;
@@ -131,7 +142,7 @@ function runDaemon(
     const token = await createCapabilityFile(paths.capabilityFile);
     const jobs = createJobStore({ dataDir: options.dataDir });
     const workers = options.workers ?? new Map<string, WorkerHostLike>();
-    const methods = createJobMethods(jobs, workers);
+    const methods = createJobMethods(jobs, workers, options, dependencies);
     const server = await startDaemonServer({
       dataDir: options.dataDir,
       token,
@@ -265,6 +276,16 @@ export interface WorkerHostLike {
   reply?(
     input: { sessionId: string; interactionId: string; outcome: string },
   ): Promise<unknown>;
+  /** §3.9.2 close sequence: cancel, confirm the queue paused, then exit. */
+  close?(input: { sessionId: string }): Promise<unknown>;
+  /** Liveness for the `✻` vs `∙` distinction, which is *process* liveness. */
+  isAlive?(input: { sessionId: string }): boolean;
+  /** Whether a Turn is in flight, which decides attach case A vs case B. */
+  isBusy?(input: { sessionId: string }): boolean;
+  /** Durable tail for the case-B peek surface. */
+  peek?(input: { sessionId: string; after?: number }): Promise<readonly unknown[]>;
+  /** Starts the worker for a job the foreground TUI just released. */
+  start?(input: { sessionId: string; job: Record<string, unknown> }): Promise<boolean>;
 }
 
 /** The §3.5 job methods a CLI or TUI client can call. */
@@ -274,6 +295,10 @@ export const JOB_METHODS = [
   'job.stop',
   'job.remove',
   'job.reply',
+  'job.adopt',
+  'job.attach.begin',
+  'job.attach.commit',
+  'job.peek',
 ] as const;
 
 const ENDED_JOB_STATES = new Set(['completed', 'failed', 'stopped']);
@@ -281,6 +306,8 @@ const ENDED_JOB_STATES = new Set(['completed', 'failed', 'stopped']);
 function createJobMethods(
   jobs: DaemonJobStore,
   workers: Map<string, WorkerHostLike>,
+  options: DaemonCommandOptions,
+  dependencies: DaemonCommandDependencies,
 ): DaemonJobMethods {
   return {
     jobs,
@@ -312,7 +339,93 @@ function createJobMethods(
       if (!worker?.reply) return { rejected: 'unknown-interaction' as const };
       return (await worker.reply(input)) as { rejected: 'rejected' };
     },
+    adopt: async (input) => {
+      // A job already owned by a live TUI cannot be adopted. Two owners both
+      // write turns to the same transcript, and the second one to think it owns
+      // the session is the one that loses work.
+      const existing = await jobs.readJob(input.sessionId);
+      if (existing?.attachedPid !== undefined && Number(existing.attachedPid) > 0) {
+        return { adopted: false as const, reason: 'busy' as const };
+      }
+      const job = {
+        ...(existing ?? {}),
+        proto: 1,
+        sessionId: input.sessionId,
+        state: 'idle',
+        origin: 'background',
+        launch: input.launch,
+        handoff: input.handoff,
+        attachedPid: undefined,
+        adoptedAt: (dependencies.now ?? Date.now)(),
+      };
+      await jobs.writeJob(job);
+      // The process is a cache (§2.2). An idle hand-off has nothing to do, so
+      // it records the job and starts nothing; a resumed Turn has to start one.
+      const workerStarted = input.handoff.continue ? await startWorker(input.sessionId, job) : false;
+      await jobs.appendTimeline(input.sessionId, {
+        at: (dependencies.now ?? Date.now)(),
+        state: workerStarted ? 'working' : 'idle',
+        detail: 'handoff-committed',
+      });
+      return { adopted: true as const, workerStarted };
+    },
+    attach: async (input) => {
+      const job = await jobs.readJob(input.sessionId);
+      if (job?.attachedPid !== undefined && Number(job.attachedPid) > 0) {
+        // Ownership is one holder at a time (§3.7).
+        return { owner: 'none' as const, live: false, reason: 'already-attached' as const };
+      }
+      const worker = workers.get(input.sessionId);
+      if (worker?.isBusy?.(input) === true) {
+        // Case B: the worker still holds a Turn. Closing it now would abort work
+        // in flight, so the TUI opens a read-only peek and queues messages.
+        return { owner: 'worker' as const, live: true };
+      }
+      // Case A: shut the worker down through the safe sequence before handing
+      // over, so the next foreground process starts from a settled transcript.
+      if (worker?.close) await worker.close(input);
+      workers.delete(input.sessionId);
+      return { owner: 'client' as const, live: false };
+    },
+    attachCommit: async (input) => {
+      const job = await jobs.readJob(input.sessionId);
+      if (!job) return { attached: false };
+      // The PID is the only way the daemon learns this driver died. A commit
+      // without it leaves the job permanently attached to nothing, and the
+      // session is unreachable even though its history is intact in the DB.
+      await jobs.updateJob(input.sessionId, {
+        state: 'attached',
+        attachedPid: process.pid,
+        attachedAt: (dependencies.now ?? Date.now)(),
+      });
+      return { attached: true };
+    },
+    peek: async (input) => {
+      const worker = workers.get(input.sessionId);
+      const events = (await worker?.peek?.(input)) ?? (await jobs.readTimeline(input.sessionId));
+      // Liveness is the process, never the last recorded state. Reporting
+      // `live: true` for a dead worker would put the user in a view that only
+      // ever repaints.
+      return {
+        owner: worker ? ('worker' as const) : ('client' as const),
+        live: worker?.isAlive?.(input) === true,
+        events,
+      };
+    },
   };
+
+  async function startWorker(
+    sessionId: string,
+    job: Record<string, unknown>,
+  ): Promise<boolean> {
+    const existing = workers.get(sessionId);
+    if (existing) return true;
+    // Started lazily: `mcode daemon run` has no registry of launch plans, and a
+    // job whose worker cannot start must still be recorded so the row shows why.
+    if (!options.startWorker) return false;
+    const started = await options.startWorker({ sessionId, job });
+    return started;
+  }
 }
 
 async function probeIncumbent(  paths: ReturnType<typeof daemonPaths>,

@@ -48,6 +48,8 @@ export interface TuiInputFlowOptions {
   readonly restoreWaitingMessage: () => Promise<boolean>;
   readonly openQueueManager: () => void;
   readonly toggleTasks: () => void;
+  /** §2.1 hand-off, bound to `←` on an empty Composer. */
+  readonly backgroundSession?: () => void;
   readonly isStopped: () => boolean;
   readonly abortLiveTurn: () => Promise<boolean>;
   readonly cancelSessionEdit?: () => boolean;
@@ -247,6 +249,11 @@ export class TuiInputFlow {
       hasLiveRun: Boolean(this.options.liveRunId()),
       hasWaitingMessage: this.options.hasWaitingMessage(),
       hasRestorableDraft: Boolean(this.clearedEditorDraft),
+      // Read here rather than in the action handler: the `empty-composer` scope
+      // has to decide before the key is claimed, or a full Composer loses its
+      // caret on the key that moves the caret.
+      composerEmpty:
+        this.options.editor.getText().length === 0 && !this.options.composerDraft.hasContent(),
     });
     if (keyAction !== 'resume-codex') this.options.dismissRecentCodexSession?.();
     if (keyAction !== 'clear') this.ctrlCExitArmed = false;
@@ -372,6 +379,16 @@ export class TuiInputFlow {
         busyAction: keyAction === 'submit-guidance' ? 'steer' : 'queue',
       };
       if (!this.options.editor.submit()) this.nextBusySubmission = undefined;
+      return { consume: true };
+    }
+    if (keyAction === 'background-session') {
+      // No fallback handler: a TUI built without a supervisor has nothing to
+      // hand off to, and swallowing the key would look identical to a bug.
+      if (!this.options.backgroundSession) {
+        this.options.setHint('Background sessions are unavailable in this build.', 'warning');
+        return { consume: true };
+      }
+      this.options.backgroundSession();
       return { consume: true };
     }
     if (keyAction === 'restore-waiting') {

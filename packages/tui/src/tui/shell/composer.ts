@@ -23,7 +23,7 @@ export interface TuiComposerState {
   contextLabel?: string;
   hint?: string;
   /** Optional discovery content that joins the normal low-priority Tips rotation. */
-  contextualTip?: TuiTip;
+  contextualTip?: TuiTip & { readonly alwaysVisible?: boolean };
   /** Semantic emphasis for warnings and in-flight stop hints. */
   hintTone?: 'danger' | 'warning';
   attention?: 'permission' | 'question';
@@ -141,18 +141,22 @@ function renderComposerHeaderWithTip(
 ): string {
   const header = renderComposerHeader(state, width, supportsShiftEnter, keybindings);
   const availableTips = state.contextualTip ? [...tips, state.contextualTip] : tips;
+  // A tip flagged `alwaysVisible` is a standing claim, not a suggestion: the
+  // awaiting badge says a background job needs a human, and that must survive
+  // whatever else the composer is currently saying on the same line.
+  const forced = state.contextualTip?.alwaysVisible === true ? state.contextualTip : undefined;
   if (
     !showTips ||
     (state.surface !== 'conversation' && !state.contextualTip) ||
     state.mode !== 'message' ||
-    state.hint?.trim() ||
-    (state.attachmentCount ?? 0) > 0 ||
-    (state.draftCharacterCount ?? 0) > 0
+    ((state.hint?.trim() || (state.attachmentCount ?? 0) > 0 ||
+      (state.draftCharacterCount ?? 0) > 0) &&
+      !forced)
   ) {
     return header;
   }
 
-  const tip = selectTuiTipAt(nowMs, availableTips);
+  const tip = forced ?? selectTuiTipAt(nowMs, availableTips);
   if (!tip) return header;
 
   for (const candidate of [tip.text, tip.shortText]) {

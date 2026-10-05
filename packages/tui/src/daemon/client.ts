@@ -5,6 +5,7 @@ import {
   DAEMON_ERROR_CODES,
   DAEMON_PROTO,
   drainNdjsonBuffer,
+  isNotificationFrame,
   isResponseFrame,
   serializeFrame,
   type DaemonRequestFrame,
@@ -25,6 +26,16 @@ export interface ConnectDaemonOptions {
 export interface DaemonClient {
   request(method: string, params?: unknown): Promise<unknown>;
   notify(method: string, params?: unknown): void;
+  /**
+   * Registers the handler for server-initiated frames.
+   *
+   * The footer's awaiting badge is a subscription rather than a poll (§3.5), so
+   * this is the only way state ever arrives once the handshake is done. A client
+   * that never registers one — `mcode agents` — simply ignores pushes, which is
+   * why the daemon treats every connection as a target instead of making
+   * clients opt in and then forget to.
+   */
+  onNotification(handler: (method: string, params: unknown) => void): void;
   close(): void;
 }
 
@@ -51,6 +62,7 @@ export async function connectDaemon(options: ConnectDaemonOptions): Promise<Daem
 
   const socket = await openSocket(socketFile);
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  let notificationHandler: ((method: string, params: unknown) => void) | undefined;
   let nextId = 1;
   let buffer = '';
   let closed = false;
@@ -66,6 +78,12 @@ export async function connectDaemon(options: ConnectDaemonOptions): Promise<Daem
     const drained = drainNdjsonBuffer(buffer);
     buffer = drained.rest;
     for (const frame of drained.frames) {
+      // Checked before the response branch: a push has no `id`, so the pending
+      // lookup below would find nothing and drop it on the floor.
+      if (isNotificationFrame(frame)) {
+        notificationHandler?.(frame.method, frame.params);
+        continue;
+      }
       if (!isResponseFrame(frame)) continue;
       const response = frame as {
         id?: unknown;
@@ -120,6 +138,9 @@ export async function connectDaemon(options: ConnectDaemonOptions): Promise<Daem
           ...(params === undefined ? {} : { params }),
         } as DaemonRequestFrame),
       );
+    },
+    onNotification: (handler) => {
+      notificationHandler = handler;
     },
     close: () => socket.destroy(),
   };

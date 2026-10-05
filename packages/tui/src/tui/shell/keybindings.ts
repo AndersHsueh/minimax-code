@@ -28,6 +28,7 @@ export type TuiShellKeyAction =
   | 'scroll-up'
   | 'scroll-down'
   | 'restore-draft'
+  | 'background-session'
   | 'clear'
   | 'interrupt'
   | 'exit'
@@ -38,11 +39,20 @@ export interface TuiKeybindingContext {
   hasLiveRun: boolean;
   hasWaitingMessage?: boolean;
   hasRestorableDraft?: boolean;
+  /**
+   * Whether the Composer holds no text.
+   *
+   * Optional so existing call sites keep compiling; a scope that needs it treats
+   * an absent value as "not empty", which is the safe direction — a hand-off
+   * binding stays inactive rather than firing over unsent text.
+   */
+  composerEmpty?: boolean;
 }
 
 export type TuiKeybindingScope =
   | 'application'
   | 'composer'
+  | 'empty-composer'
   | 'idle'
   | 'live-run'
   | 'waiting'
@@ -386,6 +396,14 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     queueOnly: true,
   },
   {
+    id: 'composer.background-session',
+    key: 'left',
+    action: 'background-session',
+    when: 'empty-composer',
+    description: 'Send this session to the background supervisor',
+    helpOrder: 26,
+  },
+  {
     id: 'composer.toggle-tasks',
     key: 'ctrl+t',
     action: 'toggle-tasks',
@@ -594,6 +612,14 @@ function scopeMatches(scope: TuiKeybindingScope, context: TuiKeybindingContext):
   if (scope === 'interaction') return context.interactionActive;
   if (context.interactionActive) return false;
   if (scope === 'composer') return true;
+  if (scope === 'empty-composer') {
+    // Not merely "no live run": §2.1 step 3 does abort a live Turn, but the
+    // refusal for a non-empty composer has to happen in the scope, or the key
+    // is consumed and the caret dies in the one case where the user needs it.
+    // An absent `composerEmpty` counts as not-empty, so a call site that has
+    // not been updated leaves the key alone rather than eating a draft.
+    return context.composerEmpty === true && !context.hasLiveRun;
+  }
   if (scope === 'idle') return !context.hasLiveRun;
   if (scope === 'waiting') return context.hasWaitingMessage === true;
   return context.hasLiveRun;
@@ -605,5 +631,8 @@ function scopesOverlap(left: TuiKeybindingScope, right: TuiKeybindingScope): boo
   if (left === 'composer' || right === 'composer') return true;
   if (left === right) return true;
   if (left === 'waiting' || right === 'waiting') return true;
+  // An empty Composer is a subset of the Composer, so the two scopes overlap
+  // and a shared key has to be reported as a conflict.
+  if (left === 'empty-composer' || right === 'empty-composer') return true;
   return false;
 }

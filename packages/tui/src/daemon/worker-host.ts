@@ -205,6 +205,34 @@ export function createWorkerHost(options: WorkerHostOptions) {
       idleSince = now();
     },
 
+    /**
+     * Starts the worker and, when the job records an interrupted Turn, resumes
+     * it.
+     *
+     * This is the normal hand-off path, and it is separate from the crash
+     * restart in {@link handleExit} on purpose. A host that only continues after
+     * a crash looks correct and silently fails the feature: a session
+     * backgrounded mid-Turn gets a live worker that reports itself idle, the row
+     * says it is working, and nothing ever runs. That is the exact bug this
+     * design exists to remove.
+     *
+     * A refusal is reported, not thrown and not swallowed: the worker's
+     * continuation inspect answers with the reason, and a job that reports
+     * success while its transcript had nothing to resume is lying to the user.
+     */
+    async startWithContinuation(): Promise<{ readonly continued: boolean }> {
+      this.start();
+      if (!options.job.handoff?.continue) return { continued: false };
+      try {
+        const result = (await request('mcode/session/continue', {
+          sessionId: options.sessionId,
+        })) as { continued?: boolean } | undefined;
+        return { continued: result?.continued === true };
+      } catch {
+        return { continued: false };
+      }
+    },
+
     stop(): Promise<GracefulShutdownResult> {
       requestedStop = true;
       const active = child;

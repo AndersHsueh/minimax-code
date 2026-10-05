@@ -223,10 +223,22 @@
       "test-case/phase2-daemon-job-store.test.ts",
       "test-case/phase2-daemon-server.test.ts",
       "test-case/phase2-daemon-command.test.ts",
-      "test-case/phase3-worker-state.test.ts",
-      "test-case/phase3-worker-recovery.test.ts",
+      "test-case/phase3-job-methods.test.ts",
       "test-case/phase3-worker-host.test.ts",
-      "test-case/phase3-job-methods.test.ts"
+      "test-case/phase3-worker-recovery.test.ts",
+      "test-case/phase3-worker-state.test.ts",
+      "test-case/phase4-background-handoff.test.ts",
+      "test-case/phase4-agent-view.test.ts",
+      "test-case/phase4-daemon-session-control.test.ts",
+      "test-case/phase4-daemon-push.test.ts",
+      "test-case/phase4-turn-settlement.test.ts",
+      "test-case/phase4-background-keybinding.test.ts",
+      "test-case/phase4-background-flow.test.ts",
+      "test-case/phase4-agent-view-panel.test.ts",
+      "test-case/phase4-attach.test.ts",
+      "test-case/phase4-awaiting-badge.test.ts",
+      "test-case/phase4-exit-impact.test.ts",
+      "test-case/phase4-worker-continuation.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

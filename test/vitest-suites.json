@@ -222,7 +222,11 @@
       "test-case/phase2-daemon-singleton.test.ts",
       "test-case/phase2-daemon-job-store.test.ts",
       "test-case/phase2-daemon-server.test.ts",
-      "test-case/phase2-daemon-command.test.ts"
+      "test-case/phase2-daemon-command.test.ts",
+      "test-case/phase3-worker-state.test.ts",
+      "test-case/phase3-worker-recovery.test.ts",
+      "test-case/phase3-worker-host.test.ts",
+      "test-case/phase3-job-methods.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

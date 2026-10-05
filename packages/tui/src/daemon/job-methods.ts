@@ -42,6 +42,14 @@ export interface DaemonJobMethods {
   readonly adopt: (input: JobAdoptInput) => Promise<JobAdoptResult>;
   /** §3.7 attach: who owns the session, and is the worker still live. */
   readonly attach: (input: { sessionId: string }) => Promise<JobAttachResult>;
+  /**
+   * §5.6.2: records the driving TUI.
+   *
+   * The PID is how the daemon notices the driver died. Without it a job stays
+   * `attached` to a process nobody is watching, and the session is unreachable
+   * forever even though its history is intact in the DB.
+   */
+  readonly attachCommit: (input: { sessionId: string }) => Promise<{ readonly attached: boolean }>;
   /** The durable tail of a job, for the case-B peek surface. */
   readonly peek: (input: { sessionId: string; after?: number }) => Promise<JobPeekResult>;
 }
@@ -133,8 +141,10 @@ export async function routeJobMethod(
         handoff: { continue: (input.handoff as { continue?: unknown } | undefined)?.continue === true },
       });
     }
-    case 'job.attach':
+    case 'job.attach.begin':
       return methods.attach({ sessionId: requireText(input.sessionId, 'sessionId') });
+    case 'job.attach.commit':
+      return methods.attachCommit({ sessionId: requireText(input.sessionId, 'sessionId') });
     case 'job.peek': {
       const sessionId = requireText(input.sessionId, 'sessionId');
       // `after` is what makes a peek usable: the case-B surface repaints on

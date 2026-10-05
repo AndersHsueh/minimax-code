@@ -296,7 +296,8 @@ export const JOB_METHODS = [
   'job.remove',
   'job.reply',
   'job.adopt',
-  'job.attach',
+  'job.attach.begin',
+  'job.attach.commit',
   'job.peek',
 ] as const;
 
@@ -385,6 +386,19 @@ function createJobMethods(
       if (worker?.close) await worker.close(input);
       workers.delete(input.sessionId);
       return { owner: 'client' as const, live: false };
+    },
+    attachCommit: async (input) => {
+      const job = await jobs.readJob(input.sessionId);
+      if (!job) return { attached: false };
+      // The PID is the only way the daemon learns this driver died. A commit
+      // without it leaves the job permanently attached to nothing, and the
+      // session is unreachable even though its history is intact in the DB.
+      await jobs.updateJob(input.sessionId, {
+        state: 'attached',
+        attachedPid: process.pid,
+        attachedAt: (dependencies.now ?? Date.now)(),
+      });
+      return { attached: true };
     },
     peek: async (input) => {
       const worker = workers.get(input.sessionId);

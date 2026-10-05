@@ -27,13 +27,12 @@
 
 export interface AttachDeps {
   readonly sessionId: string;
-  /** Asks the daemon who owns the session and whether a worker is live. */
+  /** `job.attach.begin` — asks who owns the session and whether a worker is live. */
   readonly attach: (input: { sessionId: string }) => Promise<
     | { readonly owner: 'client'; readonly live: false }
     | { readonly owner: 'worker'; readonly live: true }
     | { readonly owner: 'none'; readonly live: false; readonly reason: 'already-attached' }
-  >;
-  /**
+  >;  /**
    * Rebuilds the session from its durable history.
    *
    * The TUI has no in-memory state for a session it did not start. Skipping
@@ -41,7 +40,7 @@ export interface AttachDeps {
    * continues a conversation they cannot see.
    */
   readonly loadSessionProjection: (sessionId: string) => Promise<void>;
-  /** Tells the daemon the TUI now drives the session. */
+  /** `job.attach.commit` — tells the daemon the TUI now drives the session. */
   readonly attachCommit: (sessionId: string) => Promise<{ readonly attached: boolean }>;
   /** The durable tail, for the case-B live surface. */
   readonly peek: (input: {

@@ -56,6 +56,7 @@ describe('daemon session-control methods', () => {
       reply: async () => ({ rejected: 'not-interactive' as const }),
       adopt: async () => ({ adopted: true, workerStarted: false }),
       attach: async () => ({ owner: 'client' as const, live: false }),
+      attachCommit: async () => ({ attached: true }),
       peek: async () => ({ owner: 'client' as const, live: false, events: [] }),
       ...overrides,
     };
@@ -210,13 +211,13 @@ describe('daemon session-control methods', () => {
     });
   });
 
-  describe('job.attach', () => {
+  describe('job.attach.begin', () => {
     it('hands ownership to the client when the job is idle', async () => {
       const jobs = await store();
 
       const result = await routeJobMethod(
         methods(jobs, { attach: async () => ({ owner: 'client' as const, live: false }) }),
-        'job.attach',
+        'job.attach.begin',
         { sessionId: 'session-1' },
         tui,
       );
@@ -231,7 +232,7 @@ describe('daemon session-control methods', () => {
       // must not act as if it now owns the session.
       const result = await routeJobMethod(
         methods(jobs, { attach: async () => ({ owner: 'worker' as const, live: true }) }),
-        'job.attach',
+        'job.attach.begin',
         { sessionId: 'session-1' },
         tui,
       );
@@ -246,7 +247,7 @@ describe('daemon session-control methods', () => {
         methods(jobs, {
           attach: async () => ({ owner: 'none' as const, live: false, reason: 'already-attached' as const }),
         }),
-        'job.attach',
+        'job.attach.begin',
         { sessionId: 'session-1' },
         tui,
       );
@@ -254,14 +255,53 @@ describe('daemon session-control methods', () => {
       expect(result).toMatchObject({ reason: 'already-attached' });
     });
 
-    it('rejects an attach with no session id', async () => {
+    it('rejects a begin with no session id', async () => {
       const jobs = await store();
       const attach = vi.fn(async () => ({ owner: 'client' as const, live: false }));
 
       await expect(
-        routeJobMethod(methods(jobs, { attach }), 'job.attach', {}, tui),
+        routeJobMethod(methods(jobs, { attach }), 'job.attach.begin', {}, tui),
       ).rejects.toThrow(/sessionId/);
       expect(attach).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('job.attach.commit', () => {
+    it('records the driving TUI so its death is detectable', async () => {
+      // §5.6.2: the daemon finds the driver dead by PID plus start time. A
+      // commit that does not write the PID leaves the job permanently attached
+      // to a process nobody is watching.
+      const jobs = await store();
+      const attachCommit = vi.fn(async (input: { sessionId: string }) => {
+        await jobs.writeJob({
+          proto: 1,
+          sessionId: input.sessionId,
+          state: 'attached',
+          attachedPid: 4242,
+        });
+        return { attached: true };
+      });
+
+      const result = await routeJobMethod(
+        methods(jobs, { attachCommit }),
+        'job.attach.commit',
+        { sessionId: 'session-1' },
+        tui,
+      );
+
+      expect(result).toMatchObject({ attached: true });
+      expect(attachCommit).toHaveBeenCalledWith({ sessionId: 'session-1' });
+      expect((await jobs.readJob('session-1'))?.attachedPid).toBe(4242);
+    });
+
+    it('rejects a commit with no session id', async () => {
+      const jobs = await store();
+      const attachCommit = vi.fn(async () => ({ attached: true }));
+
+      await expect(
+        routeJobMethod(methods(jobs, { attachCommit }), 'job.attach.commit', {}, tui),
+      ).rejects.toThrow(/sessionId/);
+      expect(attachCommit).not.toHaveBeenCalled();
     });
   });
 

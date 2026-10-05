@@ -36,7 +36,20 @@ export interface JobPeekResult {
 export interface DaemonJobMethods {
   readonly jobs: DaemonJobStore;
   readonly listJobs: (input: { includeEnded?: boolean }) => Promise<Record<string, unknown>[]>;
-  readonly send: (input: { sessionId: string; text: string; mode: 'queue' | 'steer' }) => Promise<unknown>;
+  readonly send: (input: {
+    sessionId: string;
+    text: string;
+    mode: 'queue' | 'steer';
+    /**
+     * The session's workspace, supplied by the client.
+     *
+     * A worker cannot `session/load` a session whose workspace does not match,
+     * and the daemon is not allowed to look it up itself, so the only source of
+     * this value is the client that resolved the name.
+     */
+    cwd?: string;
+  }) => Promise<unknown>;
+
   readonly stop: (input: { sessionId: string }) => Promise<unknown>;
   readonly remove: (input: { sessionId: string }) => Promise<unknown>;
   readonly reply: (input: {
@@ -115,7 +128,12 @@ export async function routeJobMethod(
         return methods.stop({ sessionId });
       }
       try {
-        return await methods.send({ sessionId, text, mode });
+        return await methods.send({
+          sessionId,
+          text,
+          mode,
+          ...(typeof input.cwd === 'string' && input.cwd ? { cwd: input.cwd } : {}),
+        });
       } catch {
         // The worker may be starting or may have just crashed. Stage it: a
         // dropped message loses work the user believes was sent, and replay

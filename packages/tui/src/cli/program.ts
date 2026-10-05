@@ -216,26 +216,52 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
 
   program
     .command('send')
-    .description('Send a message to a background session')
-    .argument('<session-id>')
+    .description('Send a message to a session, by the name you gave it with /rename')
+    .argument('<target>')
     .argument('<message...>')
     .allowExcessArguments(false)
-    .action(async (sessionId: string, message: string[]) => {
+    .action(async (target: string, message: string[]) => {
       const { parseSendRequest } = await import('../daemon/agents-cli.js');
       const { runAgentClientCommand } = await import('../daemon/agent-client.js');
-      const request = parseSendRequest([sessionId, ...message]);
+      const { resolveSendTarget, describeTargetFailure } = await import('./session-target.js');
+      const request = parseSendRequest([target, ...message]);
+      const resolved = await resolveSendTarget(request.sessionId);
+      if (resolved.kind !== 'session') {
+        // A name that matches nothing, or matches more than one session, is not
+        // something to guess at: the message would go to the wrong conversation
+        // or to none, and the user has no way to see that happened.
+        process.stderr.write(`${describeTargetFailure(resolved)}\n`);
+        process.exitCode = 1;
+        return;
+      }
       const report = await runAgentClientCommand({
         dataDir: await prepareTuiDataDir(),
         version: options.version,
         method: 'job.send',
-        params: { sessionId: request.sessionId, text: request.text, mode: 'queue' },
+        params: {
+          sessionId: resolved.sessionId,
+          text: request.text,
+          mode: 'queue',
+          ...(resolved.workspaceDir ? { cwd: resolved.workspaceDir } : {}),
+        },
       });
       if ('rejected' in report) {
         process.stdout.write(`send refused: ${report.rejected}\n`);
         process.exitCode = 1;
         return;
       }
-      process.stdout.write('sent\n');
+      // A staged message is saved but has reached nobody. Reporting it as
+      // `sent` is the one answer this command must never give.
+      const staged = (report as { staged?: unknown }).staged === true;
+      if (staged) {
+        const reason = (report as { reason?: unknown }).reason;
+        process.stdout.write(
+          `saved, not delivered${typeof reason === 'string' ? ` (${reason})` : ''}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(`sent to ${resolved.title ?? resolved.sessionId}\n`);
     });
 
   program

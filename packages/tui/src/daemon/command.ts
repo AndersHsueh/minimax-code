@@ -360,21 +360,42 @@ function createJobMethods(
     send: async (input) => {
       let worker = workers.get(input.sessionId);
       if (!worker) {
-        const job = await jobs.readJob(input.sessionId);
-        if (job) {
-          await startWorker(input.sessionId, job);
-          worker = workers.get(input.sessionId);
-          // Anything staged while this session had no worker goes first, so a
-          // respawn after a crash does not reorder the conversation. The current
-          // message is skipped: the store has not staged it yet, and sending it
-          // twice would be worse than out of order.
-          for (const staged of await jobs.listPending(input.sessionId)) {
-            try {
-              await worker?.send({ ...input, text: staged.text });
-              await jobs.resolvePending(input.sessionId, staged.id);
-            } catch {
-              break;
-            }
+        // A session that has never been handed off has no job row. The client
+        // resolved a real session, so the job is created here rather than
+        // refusing: requiring a hand-off first would make `send` unusable from a
+        // shell, which is the only place a name or id is typed.
+        const existing = await jobs.readJob(input.sessionId);
+        let job = existing;
+        if (!job) {
+          job = {
+            proto: 1,
+            sessionId: input.sessionId,
+            state: 'idle',
+            origin: 'background',
+            // The client's permission choice, not the daemon's: a session that
+            // was never handed off has no recorded mode, and inheriting the
+            // daemon's global one is the drift `resolveWorkerLaunch` exists to
+            // refuse. `default` is the narrowest mode that can still answer.
+            launch: { permissionMode: 'default' },
+            handoff: { continue: false },
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            attachedPid: undefined,
+            adoptedAt: (dependencies.now ?? Date.now)(),
+          };
+          await jobs.writeJob(job);
+        }
+        await startWorker(input.sessionId, job);
+        worker = workers.get(input.sessionId);
+        // Anything staged while this session had no worker goes first, so a
+        // respawn after a crash does not reorder the conversation. The current
+        // message is skipped: the store has not staged it yet, and sending it
+        // twice would be worse than out of order.
+        for (const staged of await jobs.listPending(input.sessionId)) {
+          try {
+            await worker?.send({ ...input, text: staged.text });
+            await jobs.resolvePending(input.sessionId, staged.id);
+          } catch {
+            break;
           }
         }
       }

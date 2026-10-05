@@ -3463,6 +3463,8 @@
     "test-case/phase3-worker-state.test.ts",
     "test-case/phase4-agent-view.test.ts",
     "test-case/phase4-background-handoff.test.ts",
+    "test-case/phase4-daemon-push.test.ts",
+    "test-case/phase4-daemon-session-control.test.ts",
     "test/byok.test.mjs",
     "test/executable-resolution.test.ts",
     "test/history-processing.test.ts",

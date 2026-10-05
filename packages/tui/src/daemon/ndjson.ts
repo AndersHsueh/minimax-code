@@ -51,6 +51,27 @@ export function isResponseFrame(value: unknown): boolean {
   return value.jsonrpc === '2.0' && 'id' in value && typeof value.method !== 'string';
 }
 
+export interface DaemonNotificationFrame {
+  readonly jsonrpc: '2.0';
+  readonly method: string;
+  readonly params?: unknown;
+}
+
+/**
+ * True for a server-initiated frame: a `method` and no `id`.
+ *
+ * The footer's awaiting badge is fed by these, and the distinction is not
+ * cosmetic. Both existing predicates reject a notification — `isRequestFrame`
+ * wants an `id`, `isResponseFrame` wants no `method` — so a client written
+ * against the other two silently discards every push. The `id` check is also
+ * what keeps the `hello` handshake out: that is a request, and a handler that
+ * treated it as a push would act on a frame still awaiting its reply.
+ */
+export function isNotificationFrame(value: unknown): value is DaemonNotificationFrame {
+  if (!isRecord(value)) return false;
+  return value.jsonrpc === '2.0' && typeof value.method === 'string' && !('id' in value);
+}
+
 /**
  * Splits a growing buffer into complete frames.
  *

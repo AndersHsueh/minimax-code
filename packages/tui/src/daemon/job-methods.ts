@@ -1,5 +1,26 @@
 import type { DaemonJobStore } from './job-store.js';
 
+export interface JobAdoptInput {
+  readonly sessionId: string;
+  readonly launch: { readonly permissionMode: string };
+  readonly handoff: { readonly continue: boolean };
+}
+
+export type JobAdoptResult =
+  | { readonly adopted: true; readonly workerStarted: boolean }
+  | { readonly adopted: false; readonly reason: 'busy' | 'refused' };
+
+export type JobAttachResult =
+  | { readonly owner: 'client'; readonly live: false }
+  | { readonly owner: 'worker'; readonly live: true }
+  | { readonly owner: 'none'; readonly live: false; readonly reason: 'already-attached' };
+
+export interface JobPeekResult {
+  readonly owner: 'client' | 'worker' | 'none';
+  readonly live: boolean;
+  readonly events: readonly unknown[];
+}
+
 export interface DaemonJobMethods {
   readonly jobs: DaemonJobStore;
   readonly listJobs: (input: { includeEnded?: boolean }) => Promise<Record<string, unknown>[]>;
@@ -11,6 +32,18 @@ export interface DaemonJobMethods {
     interactionId: string;
     outcome: string;
   }) => Promise<{ rejected: 'rejected' | 'not-interactive' | 'unknown-interaction' }>;
+  /**
+   * Takes ownership of a session the foreground TUI is releasing.
+   *
+   * Returns `adopted: false` rather than throwing on a refusal: the caller has
+   * already ended a Turn by this point, and it needs to tell the user the
+   * session did *not* go to the background, not read a stack trace.
+   */
+  readonly adopt: (input: JobAdoptInput) => Promise<JobAdoptResult>;
+  /** §3.7 attach: who owns the session, and is the worker still live. */
+  readonly attach: (input: { sessionId: string }) => Promise<JobAttachResult>;
+  /** The durable tail of a job, for the case-B peek surface. */
+  readonly peek: (input: { sessionId: string; after?: number }) => Promise<JobPeekResult>;
 }
 
 export interface JobClient {
@@ -85,6 +118,31 @@ export async function routeJobMethod(
         interactionId: requireText(input.interactionId, 'interactionId'),
         outcome: requireText(input.outcome, 'outcome'),
       });
+    }
+    case 'job.adopt': {
+      const sessionId = requireText(input.sessionId, 'sessionId');
+      const permissionMode = requireText(
+        (input.launch as { permissionMode?: unknown } | undefined)?.permissionMode,
+        'launch.permissionMode',
+      );
+      return methods.adopt({
+        sessionId,
+        // Verbatim, never defaulted: this is the mode in effect at hand-off,
+        // and a respawn reads it back to avoid a silent permission drift.
+        launch: { permissionMode },
+        handoff: { continue: (input.handoff as { continue?: unknown } | undefined)?.continue === true },
+      });
+    }
+    case 'job.attach':
+      return methods.attach({ sessionId: requireText(input.sessionId, 'sessionId') });
+    case 'job.peek': {
+      const sessionId = requireText(input.sessionId, 'sessionId');
+      // `after` is what makes a peek usable: the case-B surface repaints on
+      // every push, and re-reading the whole timeline would grow without bound.
+      const after = typeof input.after === 'number' && Number.isFinite(input.after)
+        ? input.after
+        : undefined;
+      return methods.peek({ sessionId, ...(after === undefined ? {} : { after }) });
     }
     default:
       throw new Error(`Unknown daemon job method: ${method}`);

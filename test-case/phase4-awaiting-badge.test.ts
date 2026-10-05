@@ -2,7 +2,10 @@ import { stripVTControlCharacters } from 'node:util';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { createAwaitingBadgeBinding } from '../packages/tui/src/tui/controller/product/awaiting-badge.js';
+import {
+  createAwaitingBadgeBinding,
+  toAwaitingTip,
+} from '../packages/tui/src/tui/controller/product/awaiting-badge.js';
 import {
   awaitingBadge,
   type AgentViewRow,
@@ -200,6 +203,35 @@ describe('footer awaiting badge', () => {
       });
 
       expect(binding.label()).toBeUndefined();
+    });
+  });
+
+  describe('composer wiring', () => {
+    it('survives a composer hint claiming the same line', () => {
+      // The composer's contextual tip is suppressed by a non-empty hint, which
+      // is right for a rotating tip and wrong for a badge: a job waiting on a
+      // permission question must not be hidden because some other message
+      // happens to be showing.
+      const binding = createAwaitingBadgeBinding({
+        reachable: () => true,
+        rows: () => [row({ sessionId: 'a', state: 'needs-input' })],
+      });
+      binding.start();
+
+      const tip = toAwaitingTip(binding.label());
+
+      expect(tip).toBeDefined();
+      expect(tip?.alwaysVisible).toBe(true);
+    });
+
+    it('produces no tip when the badge is hidden', () => {
+      const binding = createAwaitingBadgeBinding({
+        reachable: () => true,
+        rows: () => [],
+      });
+      binding.start();
+
+      expect(toAwaitingTip(binding.label())).toBeUndefined();
     });
   });
 });

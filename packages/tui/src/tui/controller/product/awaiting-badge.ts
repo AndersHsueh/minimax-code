@@ -1,4 +1,8 @@
+import type { TuiTip } from '../../shell/tips.js';
 import { awaitingBadge, type AgentViewRow } from '../../features/agents/view-model.js';
+
+/** A tip the composer renders even while a hint is showing. */
+export type AwaitingTip = TuiTip & { readonly alwaysVisible: true };
 
 export interface AwaitingPush {
   readonly count: number;
@@ -42,6 +46,26 @@ export interface AwaitingBadgeBinding {
  * permission request shows up while the user is doing something else — which is
  * the whole reason this is a subscription.
  */
+/**
+ * Turns a badge label into something the composer can render.
+ *
+ * `alwaysVisible` is the part that matters. The composer suppresses its
+ * contextual tip whenever a hint is showing, which is right for a rotating tip
+ * and wrong here: a job parked on a permission question must not be hidden
+ * because some unrelated message happens to occupy the same line.
+ */
+export function toAwaitingTip(label: string | undefined): AwaitingTip | undefined {
+  if (!label) return undefined;
+  return {
+    id: 'awaiting',
+    command: '',
+    text: label,
+    shortText: label,
+    weight: 0,
+    alwaysVisible: true,
+  };
+}
+
 export function createAwaitingBadgeBinding(
   options: AwaitingBadgeBindingOptions,
 ): AwaitingBadgeBinding {

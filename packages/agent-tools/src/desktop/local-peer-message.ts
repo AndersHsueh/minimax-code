@@ -52,7 +52,7 @@ export class SendMessageTool
 
   async execute(
     ctx: LocalRuntimeToolContext,
-    input: { to: string; message: string; notify_when_idle?: boolean },
+    input: { to: string; message: string },
     signal?: AbortSignal,
   ): Promise<ToolResult> {
     abortIfRequested(signal);
@@ -72,7 +72,6 @@ export class SendMessageTool
           fromSessionId: ctx.sessionId,
           to,
           content,
-          ...(input.notify_when_idle === true ? { notifyWhenIdle: true } : {}),
         },
         signal,
       );

@@ -1447,11 +1447,6 @@ export class LocalRuntimeApiHost {
     return buildPeerMessagingAdapter({
       dataDir: this.configGetter().dataDir,
       conversation,
-      listAllSessions: (agentName, options) => this.listAllSessions(agentName, options),
-      readSessionName: async (sessionId) => {
-        const record = await this.getSessionById(sessionId);
-        return typeof record?.title === 'string' && record.title.trim() ? record.title : undefined;
-      },
     });
   }
   /**

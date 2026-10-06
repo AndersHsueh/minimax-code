@@ -63,8 +63,9 @@ export async function buildLocalTurnToolSourcesForHost(
   },
 ): Promise<OwnerTurnToolSources> {
   const runtimeConfig = input.host.configGetter();
-  // Before the Turn starts, so a session that is only ever *sent* something is
-  // already listening by the time the message arrives.
+  // Before the Turn starts, so the socket exists for the whole Turn. A session
+  // that receives a message is by definition about to run a Turn, so binding
+  // here rather than at process start is what keeps the roster truthful.
   await input.host.ensurePeerInbox(input.session.sessionId);
   const memoryAgentScopeEnabled =
     input.excludeAgentResources || input.session.sessionKind === 'task'

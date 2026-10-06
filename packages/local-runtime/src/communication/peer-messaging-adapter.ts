@@ -2,12 +2,10 @@ import type { LocalPeerMessagingAdapter, LocalPeerSendOutcome, LocalPeerSessionS
 import type { RuntimeConversation } from '@mavis/conversation-contract';
 
 import {
-  listBoundPeerSessions,
-  pruneStaleInboxes,
+  listLiveInboxes,
   sendToPeerInbox,
   type PeerMessageEnvelope,
 } from '../communication/peer-inbox.js';
-import type { LocalSessionListOptions, LocalSessionRecord } from '../sessions/controller.js';
 
 /**
  * §4.2 / §4.4 The agent-facing half of cross-session messaging.
@@ -30,12 +28,6 @@ export interface PeerMessagingDeps {
     readonly query: Pick<RuntimeConversation['query'], 'getSession'>;
     readonly ingress: Pick<RuntimeConversation['ingress'], 'submit' | 'abort'>;
   };
-  listAllSessions(
-    agentName?: string,
-    options?: LocalSessionListOptions,
-  ): Promise<LocalSessionRecord[]>;
-  /** Resolves the name the user gave a session, for the reply address. */
-  readSessionName(sessionId: string): Promise<string | undefined>;
   /**
    * How long `sendMessage` waits for the peer's answer before reporting
    * delivery without one. Defaults to the client default.
@@ -63,17 +55,16 @@ export function buildPeerMessagingAdapter(deps: PeerMessagingDeps): LocalPeerMes
 async function listPeers(deps: PeerMessagingDeps, selfSessionId: string): Promise<
   LocalPeerSessionSummary[]
 > {
-  await pruneStaleInboxes(deps.dataDir);
-  const bound = new Set(await listBoundPeerSessions(deps.dataDir));
-  if (bound.size === 0) {
+  const live = await listLiveInboxes(deps.dataDir);
+  if (live.length === 0) {
     // The caller still appears: it is running, and the first row is the name its
     // peers use to reach it (§4.11), even before any other session is up.
     const self = await describeSession(deps, selfSessionId);
     return self ? [{ ...self, isSelf: true }] : [];
   }
+  const described = await describeSessions(deps, live);
   const summaries: LocalPeerSessionSummary[] = [];
-  for (const sessionId of bound) {
-    const summary = await describeSession(deps, sessionId);
+  for (const [sessionId, summary] of described) {
     if (summary) summaries.push({ ...summary, isSelf: sessionId === selfSessionId });
   }
   summaries.sort((a, b) => {
@@ -83,21 +74,41 @@ async function listPeers(deps: PeerMessagingDeps, selfSessionId: string): Promis
   return summaries;
 }
 
+/**
+ * Resolves several sessions at once.
+ *
+ * These are independent reads of the same store, so they run together: N
+ * sequential lookups made one tool call scale with the number of sessions the
+ * user happens to have open, which is exactly the case where the list is
+ * longest.
+ */
+async function describeSessions(
+  deps: PeerMessagingDeps,
+  sessionIds: readonly string[],
+): Promise<Array<[string, DescribedPeer | undefined]>> {
+  return Promise.all(
+    sessionIds.map(
+      async (sessionId): Promise<[string, DescribedPeer | undefined]> => [
+        sessionId,
+        await describeSession(deps, sessionId),
+      ],
+    ),
+  );
+}
+
+/** A peer as the store describes it; `isSelf` is the caller's judgement, not the store's. */
+type DescribedPeer = Omit<LocalPeerSessionSummary, 'isSelf'>;
+
 async function describeSession(
   deps: PeerMessagingDeps,
   sessionId: string,
-): Promise<LocalPeerSessionSummary | undefined> {
+): Promise<DescribedPeer | undefined> {
   const session = await deps.conversation.query.getSession(sessionId).catch(() => undefined);
   if (!session) return undefined;
   const workspaceDir = typeof session.workspaceDir === 'string' ? session.workspaceDir : undefined;
   const title = typeof session.title === 'string' ? session.title : undefined;
-  const name = title?.trim() || (await deps.readSessionName(sessionId));
-  return {
-    sessionId,
-    ...(name ? { name } : {}),
-    ...(workspaceDir ? { workspaceDir } : {}),
-    isSelf: false,
-  };
+  const name = title?.trim() || undefined;
+  return { sessionId, ...(name ? { name } : {}), ...(workspaceDir ? { workspaceDir } : {}) };
 }
 
 async function sendMessage(
@@ -111,25 +122,26 @@ async function sendMessage(
   },
   signal?: AbortSignal,
 ): Promise<LocalPeerSendOutcome> {
-  await pruneStaleInboxes(deps.dataDir);
-  const bound = new Set(await listBoundPeerSessions(deps.dataDir));
-  if (bound.size === 0) {
+  const live = await listLiveInboxes(deps.dataDir);
+  if (live.length === 0) {
     return {
       delivered: false,
       reason: 'no other session on this machine is running, so there is nobody to message',
     };
   }
 
-  const target = await resolveTarget(deps, req.to, bound);
+  const target = await resolveTarget(deps, req.to, live);
   if ('error' in target) return target.error;
 
-  const fromName = req.fromName ?? (await deps.readSessionName(req.fromSessionId));
+  // §4.3: the message carries the sender's name so the receiving session knows
+  // who to reply to. The sender is itself a live inbox, so this is one lookup,
+  // not a per-peer cost.
+  const fromName = req.fromName ?? (await describeSession(deps, req.fromSessionId))?.name;
   const envelope: PeerMessageEnvelope = {
     type: 'message',
     fromSessionId: req.fromSessionId,
     ...(fromName ? { fromName } : {}),
     content: req.content,
-    ...(req.notifyWhenIdle === true ? { notifyWhenIdle: true } : {}),
   };
 
   const result = await sendToPeerInbox({
@@ -141,16 +153,19 @@ async function sendMessage(
   });
 
   if (!result.ok) {
-    if (result.detail === 'held') {
-      return {
-        delivered: false,
-        reason: `${target.name ?? target.sessionId} is holding the message for your approval; it was not delivered`,
-      };
-    }
     if (result.detail === 'refused') {
       return {
         delivered: false,
-        reason: `${target.name ?? target.sessionId} refused the message (${result.reason})`,
+        reason: `${target.name ?? target.sessionId} did not accept the message: ${result.reason}`,
+      };
+    }
+    if (result.detail === 'throttled') {
+      // §4.12: the throttle is the receiving session's rate limit firing, not a
+      // decision by the receiving session's user or policy. Say which, so the
+      // sender retries with a pause rather than concluding it was rejected.
+      return {
+        delivered: false,
+        reason: `${target.name ?? target.sessionId} ${result.reason}. Wait before sending again.`,
       };
     }
     if (result.detail === 'delivered-no-reply') {
@@ -187,16 +202,15 @@ type ResolveResult =
 async function resolveTarget(
   deps: PeerMessagingDeps,
   to: string,
-  bound: ReadonlySet<string>,
+  live: readonly string[],
 ): Promise<ResolveResult> {
-  if (SESSION_ID_PATTERN.test(to) && bound.has(to)) {
+  if (SESSION_ID_PATTERN.test(to) && live.includes(to)) {
     const summary = await describeSession(deps, to);
     return summary ? { sessionId: to, ...(summary.name ? { name: summary.name } : {}) } : { sessionId: to };
   }
 
   const running: Array<{ sessionId: string; name?: string }> = [];
-  for (const sessionId of bound) {
-    const summary = await describeSession(deps, sessionId);
+  for (const [sessionId, summary] of await describeSessions(deps, live)) {
     if (summary) running.push({ sessionId, ...(summary.name ? { name: summary.name } : {}) });
   }
 

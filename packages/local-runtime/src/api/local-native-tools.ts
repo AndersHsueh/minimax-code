@@ -13,6 +13,7 @@ import {
   type LocalMavisCronAdapter,
   type LocalMavisMcpAdapter,
   type LocalMavisSessionAdapter,
+  type LocalPeerMessagingAdapter,
   type LocalTaskAdapter,
   type LocalTaskAppendAdapter,
   type LocalTaskControlAdapter,
@@ -87,6 +88,8 @@ export function buildLocalNativeRuntimeTools(input: {
   mavisCronAdapter?: LocalMavisCronAdapter;
   mavisMcpAdapter?: LocalMavisMcpAdapter;
   mavisSessionAdapter?: LocalMavisSessionAdapter;
+  /** §4.2. Absent → this surface has neither SendMessage nor ListAgents. */
+  peerMessagingAdapter?: LocalPeerMessagingAdapter;
   emitBusEvent?: (type: string, payload: Record<string, unknown>) => void;
   /** Optional metrics reporter injected by the host. Absent → noop. */
   metrics?: ModuleMetricsReporter;
@@ -228,6 +231,7 @@ export function buildLocalNativeRuntimeTools(input: {
       mavisCronAdapter: input.mavisCronAdapter,
       mavisMcpAdapter: input.mavisMcpAdapter,
       mavisSessionAdapter: input.mavisSessionAdapter,
+      peerMessagingAdapter: input.peerMessagingAdapter,
       websiteDeployAdapter: new LocalWebsiteDeployClient({
         ...(input.authContext ? { authContext: input.authContext } : {}),
         ...(input.dataDir ? { dataDir: input.dataDir } : {}),
@@ -304,6 +308,7 @@ export async function buildLocalTurnToolSources(
     mavisCronAdapter: input.mavisCronAdapter,
     mavisMcpAdapter: input.mcpService.createMavisAdapter(input.emitBusEvent),
     mavisSessionAdapter: input.mavisSessionAdapter,
+    peerMessagingAdapter: input.peerMessagingAdapter,
     codeReviewAdapter: input.codeReviewAdapter,
     emitBusEvent: input.emitBusEvent,
     metrics: input.metrics,

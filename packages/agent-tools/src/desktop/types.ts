@@ -876,3 +876,41 @@ export interface LocalMavisSessionAdapter {
     content: string;
   }>;
 }
+
+/** One row of §4.11 `/list-agents`. */
+export interface LocalPeerSessionSummary {
+  readonly sessionId: string;
+  /** The name set with /rename or --name. Auto-generated names count. */
+  readonly name?: string;
+  readonly workspaceDir?: string;
+  /** True for the calling session, which is listed so peers can address it. */
+  readonly isSelf: boolean;
+}
+
+export type LocalPeerSendOutcome =
+  | { readonly delivered: true; readonly reply: string; readonly targetSessionId: string; readonly targetName?: string }
+  /**
+   * Not an exception. §4.1/S1 name the cases as results — no such session,
+   * two sessions share the name, the target is not running, the receiving
+   * session holds the message — and a tool that threw on them would hand the
+   * model a stack trace instead of the reason it needs to pick another target.
+   */
+  | { readonly delivered: false; readonly reason: string; readonly candidates?: readonly string[] };
+
+export interface LocalPeerMessagingAdapter {
+  listPeers(
+    req: { readonly selfSessionId: string },
+    signal?: AbortSignal,
+  ): Promise<LocalPeerSessionSummary[]>;
+  sendMessage(
+    req: {
+      readonly fromSessionId: string;
+      readonly fromName?: string;
+      /** A session name, or a session id. Never guessed at. */
+      readonly to: string;
+      readonly content: string;
+      readonly notifyWhenIdle?: boolean;
+    },
+    signal?: AbortSignal,
+  ): Promise<LocalPeerSendOutcome>;
+}

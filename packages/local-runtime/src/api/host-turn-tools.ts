@@ -5,6 +5,7 @@ import type {
   LocalMavisAgentAdapter,
   LocalMavisCronAdapter,
   LocalMavisSessionAdapter,
+  LocalPeerMessagingAdapter,
   LocalCodeReviewAdapter,
   LocalSandboxBashExecutionPort,
 } from '@mavis/agent-tools/desktop';
@@ -58,9 +59,13 @@ export async function buildLocalTurnToolSourcesForHost(
     mavisAgentAdapter: LocalMavisAgentAdapter;
     mavisCronAdapter?: LocalMavisCronAdapter;
     mavisSessionAdapter: LocalMavisSessionAdapter;
+    peerMessagingAdapter: LocalPeerMessagingAdapter;
   },
 ): Promise<OwnerTurnToolSources> {
   const runtimeConfig = input.host.configGetter();
+  // Before the Turn starts, so a session that is only ever *sent* something is
+  // already listening by the time the message arrives.
+  await input.host.ensurePeerInbox(input.session.sessionId);
   const memoryAgentScopeEnabled =
     input.excludeAgentResources || input.session.sessionKind === 'task'
       ? false
@@ -112,6 +117,7 @@ export async function buildLocalTurnToolSourcesForHost(
       ? { mavisCronAdapter: input.mavisCronAdapter }
       : {}),
     mavisSessionAdapter: input.mavisSessionAdapter,
+    peerMessagingAdapter: input.peerMessagingAdapter,
     cuModeActive: input.cuModeActive,
     ...(input.miniappAvailable === true ? { miniappAvailable: true } : {}),
     ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),

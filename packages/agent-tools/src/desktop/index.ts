@@ -10,6 +10,7 @@ import { LocalGrepTool } from './local-grep.js';
 import { LocalSkillTool } from './local-skill.js';
 import { LocalMavisTool } from './local-mavis.js';
 import { LocalMemoryTool } from './local-memory.js';
+import { ListAgentsTool, SendMessageTool } from './local-peer-message.js';
 import { LocalCodeReviewTool } from './local-code-review.js';
 import {
   LocalTaskOutputTool,
@@ -40,6 +41,7 @@ import type {
   LocalMavisCronAdapter,
   LocalMavisMcpAdapter,
   LocalMavisSessionAdapter,
+  LocalPeerMessagingAdapter,
   LocalSandboxBashOperationsFactory,
 } from './types.js';
 
@@ -117,6 +119,12 @@ export interface LocalToolRegistryDeps {
   mavisCronAdapter?: LocalMavisCronAdapter;
   mavisMcpAdapter?: LocalMavisMcpAdapter;
   mavisSessionAdapter?: LocalMavisSessionAdapter;
+  /**
+   * §4.2 cross-session messaging. Present only when the host can actually
+   * reach a peer, so a session without it has neither tool rather than a tool
+   * that always refuses.
+   */
+  peerMessagingAdapter?: LocalPeerMessagingAdapter;
 }
 
 export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string, LocalRuntimeTool> {
@@ -184,6 +192,12 @@ export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string,
   if (deps.websiteDeployAdapter) {
     tools.push(
       toRuntimeTool(new LocalWebsiteDeployTool(deps.websiteDeployAdapter, deps.workspaceRoot)),
+    );
+  }
+  if (deps.peerMessagingAdapter) {
+    tools.push(
+      toRuntimeTool(new SendMessageTool(deps.peerMessagingAdapter)),
+      toRuntimeTool(new ListAgentsTool(deps.peerMessagingAdapter)),
     );
   }
 

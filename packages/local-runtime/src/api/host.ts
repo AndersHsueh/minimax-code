@@ -124,6 +124,11 @@ import {
 import { LocalDynamicMaxTokensState } from "../runtime/dynamic-max-tokens.js";
 import { resolveLocalRuntimeLocale } from "../runtime/locale.js";
 import { buildMavisSessionAdapter } from "../runtime/mavis-tool-adapters.js";
+import { buildPeerMessagingAdapter } from "../communication/peer-messaging-adapter.js";
+import {
+  ensureSessionInbox,
+  releaseAllSessionInboxes,
+} from "../communication/peer-inbox-manager.js";
 import type { LocalMcpRuntimeCapability } from "../runtime/mcp-capability.js";
 import {
   buildLocalRuntimeCapabilities,
@@ -1162,6 +1167,7 @@ export class LocalRuntimeApiHost {
       mavisAgentAdapter: createLocalMavisAgentAdapter(this.agentRuntimePort),
       mavisCronAdapter: this.buildOwnerMavisCronAdapter(),
       mavisSessionAdapter: this.buildOwnerMavisSessionAdapter(),
+      peerMessagingAdapter: this.buildOwnerPeerMessagingAdapter(),
     });
   }
   createHostedAgentCapabilities(): HostedAgentCapabilities {
@@ -1426,6 +1432,45 @@ export class LocalRuntimeApiHost {
         this.listDisplayMessages(sessionId, opts),
     });
   }
+
+  /**
+   * §4.2 cross-session messaging.
+   *
+   * Available on every owner kind that can run a Turn, because the feature is
+   * about sessions reaching each other rather than about one surface having
+   * the privilege: a TUI session and a headless worker both need to be able to
+   * message a peer, and neither needs more permission to do it than its own Turn
+   * already has.
+   */
+  private buildOwnerPeerMessagingAdapter() {
+    const conversation = this.requireRuntimeConversation("Peer messaging adapter");
+    return buildPeerMessagingAdapter({
+      dataDir: this.configGetter().dataDir,
+      conversation,
+      listAllSessions: (agentName, options) => this.listAllSessions(agentName, options),
+      readSessionName: async (sessionId) => {
+        const record = await this.getSessionById(sessionId);
+        return typeof record?.title === 'string' && record.title.trim() ? record.title : undefined;
+      },
+    });
+  }
+  /**
+   * §4.5 Binds `sessionId`'s inbox if it does not have one yet.
+   *
+   * Called from the turn path so that every surface gets an inbox without any of
+   * them registering: an interactive TUI, an ACP client and a daemon worker all
+   * run turns. Binding is idempotent, so the second turn of a session is a map
+   * lookup rather than another `listen`.
+   */
+  public async ensurePeerInbox(sessionId: string): Promise<void> {
+    const conversation = this.requireRuntimeConversation("Session peer inbox");
+    await ensureSessionInbox({
+      dataDir: this.configGetter().dataDir,
+      sessionId,
+      conversation,
+    });
+  }
+
   public async deleteSession(sessionId: string): Promise<void> {
     if (this.runtimeConversation) {
       // Delegate authoritative deletion to the V2 Session lifecycle.
@@ -1454,6 +1499,7 @@ export class LocalRuntimeApiHost {
     const cleanups: Array<() => void | Promise<void>> = [
       () => this.questionnaireAutoReplyScheduler.close(),
       () => this.globalEvents.close(),
+      () => releaseAllSessionInboxes(),
       () => drainBackgroundTasks(this),
       () => this.errorReporter?.close(),
     ];

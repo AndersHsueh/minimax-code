@@ -8,6 +8,7 @@ import type {
   LocalMavisAgentAdapter,
   LocalMavisCronAdapter,
   LocalMavisSessionAdapter,
+  LocalPeerMessagingAdapter,
   LocalTaskAdapter,
   LocalTaskAppendAdapter,
   LocalTaskControlAdapter,
@@ -63,6 +64,8 @@ export interface LocalTurnToolSourcesInput {
   mavisAgentAdapter?: LocalMavisAgentAdapter;
   mavisCronAdapter?: LocalMavisCronAdapter;
   mavisSessionAdapter?: LocalMavisSessionAdapter;
+  /** §4.2. Absent → this surface has neither SendMessage nor ListAgents. */
+  peerMessagingAdapter?: LocalPeerMessagingAdapter;
   codeReviewAdapter?: LocalCodeReviewAdapter;
   /** Optional metrics reporter injected by the host. Absent -> noop. */
   metrics?: ModuleMetricsReporter;

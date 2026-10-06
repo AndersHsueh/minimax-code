@@ -235,7 +235,8 @@
       "test-case/phase4-exit-impact.test.ts",
       "test-case/phase4-worker-continuation.test.ts",
       "test-case/phase5-worker-delivery.test.ts",
-      "test-case/phase5-session-target.test.ts"
+      "test-case/phase5-session-target.test.ts",
+      "test-case/phase6-cross-session-messaging.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

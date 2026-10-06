@@ -9,3 +9,6 @@ dist/
 !.env.example
 .DS_Store
 mydocs/
+
+# Local instruction file: keeps this machine's additions out of the public projection.
+AGENTS.md

@@ -28,7 +28,6 @@ export type TuiShellKeyAction =
   | 'scroll-up'
   | 'scroll-down'
   | 'restore-draft'
-  | 'background-session'
   | 'clear'
   | 'interrupt'
   | 'exit'
@@ -394,14 +393,6 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     helpOrder: 92,
     helpGroup: 'run.restore-waiting',
     queueOnly: true,
-  },
-  {
-    id: 'composer.background-session',
-    key: 'left',
-    action: 'background-session',
-    when: 'empty-composer',
-    description: 'Send this session to the background supervisor',
-    helpOrder: 26,
   },
   {
     id: 'composer.toggle-tasks',

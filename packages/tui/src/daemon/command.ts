@@ -5,6 +5,7 @@ import { connectDaemon, type DaemonClient } from './client.js';
 import { daemonPaths } from './paths.js';
 import { startDaemonServer, type RunningDaemon } from './server.js';
 import { acquireDaemonSingleton } from './singleton.js';
+import { createWorkerRegistry } from './worker-registry.js';
 
 /** Exit codes the daemon command uses. */
 export const DAEMON_EXIT = {
@@ -14,6 +15,24 @@ export const DAEMON_EXIT = {
 } as const;
 
 const PERMISSION_MODES = ['default', 'auto', 'bypassPermissions', 'off'] as const;
+
+/**
+ * Which `mcode` a worker is spawned with.
+ *
+ * Production resolves the bare name so a worker is whatever the user installed
+ * and upgraded. `MCODE_WORKER_ENTRY` exists so a local verification run spawns
+ * the build under test instead of a global binary — otherwise a change here
+ * looks like it worked while a different `mcode` served the request.
+ *
+ * A `.js` path is spawned through the current Node, because a build that was
+ * never `npm link`ed is not on PATH and has no shebang to rely on.
+ */
+function resolveWorkerCommand(): { command?: string; entryArgs?: string[] } {
+  const entry = process.env.MCODE_WORKER_ENTRY;
+  if (!entry) return {};
+  if (entry.endsWith('.js')) return { command: process.execPath, entryArgs: [entry] };
+  return { command: entry };
+}
 
 export interface DaemonCommandOptions {
   readonly dataDir: string;
@@ -141,8 +160,21 @@ function runDaemon(
     }
     const token = await createCapabilityFile(paths.capabilityFile);
     const jobs = createJobStore({ dataDir: options.dataDir });
-    const workers = options.workers ?? new Map<string, WorkerHostLike>();
-    const methods = createJobMethods(jobs, workers, options, dependencies);
+    // The registry owns process lifecycle: it starts a worker only when a job
+    // needs one, and it is the thing that can be told which `mcode` to spawn.
+    const registry =
+      options.workers === undefined && options.startWorker === undefined
+        ? createWorkerRegistry({
+            jobs,
+            dataDir: options.dataDir,
+            version: dependencies.version,
+            ...resolveWorkerCommand(),
+            ...(dependencies.now ? { now: dependencies.now } : {}),
+          })
+        : undefined;
+    const workers = options.workers ?? registry?.workerMap ?? new Map<string, WorkerHostLike>();
+    const startWorker = options.startWorker ?? registry?.start;
+    const methods = createJobMethods(jobs, workers, options, dependencies, startWorker);
     const server = await startDaemonServer({
       dataDir: options.dataDir,
       token,
@@ -308,6 +340,7 @@ function createJobMethods(
   workers: Map<string, WorkerHostLike>,
   options: DaemonCommandOptions,
   dependencies: DaemonCommandDependencies,
+  start?: (input: { sessionId: string; job: Record<string, unknown> }) => Promise<boolean>,
 ): DaemonJobMethods {
   return {
     jobs,
@@ -321,10 +354,51 @@ function createJobMethods(
       }
       return rows;
     },
-    // No live worker is the normal case, not an error: the process is a cache.
-    // The throw routes into the staging path, which persists the message in order.
+    // A session with no worker is the normal case between messages, not an
+    // error: the process is a cache, so `send` wakes it and then delivers. Only
+    // a worker that will not come up at all stages the message.
     send: async (input) => {
-      const worker = workers.get(input.sessionId);
+      let worker = workers.get(input.sessionId);
+      if (!worker) {
+        // A session that has never been handed off has no job row. The client
+        // resolved a real session, so the job is created here rather than
+        // refusing: requiring a hand-off first would make `send` unusable from a
+        // shell, which is the only place a name or id is typed.
+        const existing = await jobs.readJob(input.sessionId);
+        let job = existing;
+        if (!job) {
+          job = {
+            proto: 1,
+            sessionId: input.sessionId,
+            state: 'idle',
+            origin: 'background',
+            // The client's permission choice, not the daemon's: a session that
+            // was never handed off has no recorded mode, and inheriting the
+            // daemon's global one is the drift `resolveWorkerLaunch` exists to
+            // refuse. `default` is the narrowest mode that can still answer.
+            launch: { permissionMode: 'default' },
+            handoff: { continue: false },
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            attachedPid: undefined,
+            adoptedAt: (dependencies.now ?? Date.now)(),
+          };
+          await jobs.writeJob(job);
+        }
+        await startWorker(input.sessionId, job);
+        worker = workers.get(input.sessionId);
+        // Anything staged while this session had no worker goes first, so a
+        // respawn after a crash does not reorder the conversation. The current
+        // message is skipped: the store has not staged it yet, and sending it
+        // twice would be worse than out of order.
+        for (const staged of await jobs.listPending(input.sessionId)) {
+          try {
+            await worker?.send({ ...input, text: staged.text });
+            await jobs.resolvePending(input.sessionId, staged.id);
+          } catch {
+            break;
+          }
+        }
+      }
       if (!worker) throw new Error('No worker is running for this session.');
       return worker.send(input);
     },
@@ -355,6 +429,9 @@ function createJobMethods(
         origin: 'background',
         launch: input.launch,
         handoff: input.handoff,
+        // Kept from the earlier record when this adopt does not name one: a
+        // worker that loses the workspace cannot load its own session.
+        cwd: input.cwd ?? (existing as { cwd?: unknown } | undefined)?.cwd,
         attachedPid: undefined,
         adoptedAt: (dependencies.now ?? Date.now)(),
       };
@@ -402,14 +479,25 @@ function createJobMethods(
     },
     peek: async (input) => {
       const worker = workers.get(input.sessionId);
-      const events = (await worker?.peek?.(input)) ?? (await jobs.readTimeline(input.sessionId));
+      // Both sources, merged: the durable timeline survives a worker that died,
+      // and the live worker's own events carry the Turn that is running now.
+      // Preferring one over the other loses half the history — preferring the
+      // worker alone shows an empty tail for a session that was just started,
+      // which reads as "nothing happened".
+      const [timeline, live] = await Promise.all([
+        jobs.readTimeline(input.sessionId),
+        (worker?.peek?.(input) ?? Promise.resolve([])) as Promise<readonly unknown[]>,
+      ]);
+      const merged = [...timeline, ...live].sort(
+        (left, right) => Number((left as { at?: unknown }).at ?? 0) - Number((right as { at?: unknown }).at ?? 0),
+      );
       // Liveness is the process, never the last recorded state. Reporting
       // `live: true` for a dead worker would put the user in a view that only
       // ever repaints.
       return {
         owner: worker ? ('worker' as const) : ('client' as const),
         live: worker?.isAlive?.(input) === true,
-        events,
+        events: merged,
       };
     },
   };
@@ -420,10 +508,10 @@ function createJobMethods(
   ): Promise<boolean> {
     const existing = workers.get(sessionId);
     if (existing) return true;
-    // Started lazily: `mcode daemon run` has no registry of launch plans, and a
-    // job whose worker cannot start must still be recorded so the row shows why.
-    if (!options.startWorker) return false;
-    const started = await options.startWorker({ sessionId, job });
+    // Started lazily: a job whose worker cannot start must still be recorded so
+    // the row shows why, and a message sent before the worker is up stays staged.
+    if (!start) return false;
+    const started = await start({ sessionId, job });
     return started;
   }
 }

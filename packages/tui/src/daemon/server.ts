@@ -135,6 +135,15 @@ export async function startDaemonServer(
     // is one-way: a client that misses the first frame stays unauthenticated.
     let client: DaemonClientInfo | undefined;
     let seenAnyFrame = false;
+    // "Idle" means no request is being served. `job.send` may start a worker and
+    // load its session before it answers, and a timer that fired during that
+    // window would drop a peer the daemon was about to answer.
+    let serving = 0;
+    const idleLimit = options.idleTimeoutMs ?? DAEMON_DEFAULT_IDLE_TIMEOUT_MS;
+    const armIdleTimer = (): void => {
+      socket.setTimeout(serving > 0 ? 0 : idleLimit, () => socket.destroy());
+    };
+    armIdleTimer();
 
     socket.on('data', (chunk) => {
       buffer += chunk.toString('utf8');
@@ -181,7 +190,14 @@ export async function startDaemonServer(
           rejectAndDrop(socket, frame.id, 'This connection has already handshaken.');
           return;
         }
-        void dispatch(socket, frame, client);
+        // Counted here, after the handshake, so the handshake's own `continue`
+        // paths cannot leak a count and leave the timer disabled forever.
+        serving += 1;
+        armIdleTimer();
+        void dispatch(socket, frame, client).finally(() => {
+          serving = Math.max(0, serving - 1);
+          armIdleTimer();
+        });
       }
     });
     socket.on('error', () => socket.destroy());

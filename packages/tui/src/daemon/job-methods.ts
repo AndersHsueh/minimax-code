@@ -2,8 +2,20 @@ import type { DaemonJobStore } from './job-store.js';
 
 export interface JobAdoptInput {
   readonly sessionId: string;
-  readonly launch: { readonly permissionMode: string };
+  readonly launch: {
+    readonly permissionMode: string;
+    readonly model?: string;
+    readonly effort?: string;
+    readonly lane?: string;
+  };
   readonly handoff: { readonly continue: boolean };
+  /**
+   * The session's workspace.
+   *
+   * Recorded because a worker has to `session/load` before it can answer, and
+   * the runtime refuses a load whose workspace does not match the session's.
+   */
+  readonly cwd?: string;
 }
 
 export type JobAdoptResult =
@@ -24,7 +36,20 @@ export interface JobPeekResult {
 export interface DaemonJobMethods {
   readonly jobs: DaemonJobStore;
   readonly listJobs: (input: { includeEnded?: boolean }) => Promise<Record<string, unknown>[]>;
-  readonly send: (input: { sessionId: string; text: string; mode: 'queue' | 'steer' }) => Promise<unknown>;
+  readonly send: (input: {
+    sessionId: string;
+    text: string;
+    mode: 'queue' | 'steer';
+    /**
+     * The session's workspace, supplied by the client.
+     *
+     * A worker cannot `session/load` a session whose workspace does not match,
+     * and the daemon is not allowed to look it up itself, so the only source of
+     * this value is the client that resolved the name.
+     */
+    cwd?: string;
+  }) => Promise<unknown>;
+
   readonly stop: (input: { sessionId: string }) => Promise<unknown>;
   readonly remove: (input: { sessionId: string }) => Promise<unknown>;
   readonly reply: (input: {
@@ -103,7 +128,12 @@ export async function routeJobMethod(
         return methods.stop({ sessionId });
       }
       try {
-        return await methods.send({ sessionId, text, mode });
+        return await methods.send({
+          sessionId,
+          text,
+          mode,
+          ...(typeof input.cwd === 'string' && input.cwd ? { cwd: input.cwd } : {}),
+        });
       } catch {
         // The worker may be starting or may have just crashed. Stage it: a
         // dropped message loses work the user believes was sent, and replay
@@ -133,11 +163,26 @@ export async function routeJobMethod(
         (input.launch as { permissionMode?: unknown } | undefined)?.permissionMode,
         'launch.permissionMode',
       );
+      // model/effort/lane are recorded verbatim for the same reason the mode is:
+      // a respawn reads them back, and a worker that silently fell back to the
+      // global model would answer a different model than the one in effect when
+      // the session was handed off. Omitted fields stay omitted, so a job with no
+      // model still starts on the default.
+      const launch = input.launch as
+        | { model?: unknown; effort?: unknown; lane?: unknown }
+        | undefined;
       return methods.adopt({
         sessionId,
-        // Verbatim, never defaulted: this is the mode in effect at hand-off,
-        // and a respawn reads it back to avoid a silent permission drift.
-        launch: { permissionMode },
+        // The session's own workspace, recorded so a worker's `session/load`
+        // is accepted. The runtime refuses a workspace mismatch, and a worker
+        // that cannot load its session silently never answers.
+        ...(typeof input.cwd === 'string' && input.cwd ? { cwd: input.cwd } : {}),
+        launch: {
+          permissionMode,
+          ...(typeof launch?.model === 'string' ? { model: launch.model } : {}),
+          ...(typeof launch?.effort === 'string' ? { effort: launch.effort } : {}),
+          ...(typeof launch?.lane === 'string' ? { lane: launch.lane } : {}),
+        },
         handoff: { continue: (input.handoff as { continue?: unknown } | undefined)?.continue === true },
       });
     }

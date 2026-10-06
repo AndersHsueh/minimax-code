@@ -101,12 +101,24 @@ export class SendMessageTool
     }
 
     const where = outcome.targetName ?? outcome.targetSessionId;
+    // An empty reply means delivery without an answer, not a silent session. The
+    // model has to say which it was, because "sent" and "sent and it answered"
+    // lead to different next moves.
+    if (!outcome.reply.trim()) {
+      return ok(
+        SendMessageToolDef.name,
+        `Delivered to ${where}. It has not replied yet — it is still working on it or on something else. Do not send this message again; check with it later.`,
+        { to, targetSessionId: outcome.targetSessionId, delivered: true, replied: false },
+      );
+    }
     return ok(
       SendMessageToolDef.name,
       `Sent to ${where}. Its reply:\n\n${outcome.reply}`,
       {
         to,
         targetSessionId: outcome.targetSessionId,
+        delivered: true,
+        replied: true,
         ...(outcome.targetName ? { targetName: outcome.targetName } : {}),
       },
     );

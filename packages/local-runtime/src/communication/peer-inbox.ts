@@ -49,11 +49,29 @@ export type PeerInboxResponseLine =
   | { readonly type: 'refused'; readonly sessionId: string; readonly reason: string };
 
 /**
- * §4.12: Claude Code closes a connection that has not sent a complete line
- * within 30 seconds. The same deadline is enforced on the client so a stuck
- * peer fails as a refusal rather than hanging the caller's Turn forever.
+ * §4.5: Claude Code closes a connection that has not sent a complete line
+ * within 30 seconds.
+ *
+ * That is a deadline on *emitting the request*, not on the peer's answer. The
+ * peer has to start a Turn to produce one, and a Turn that reads files or runs
+ * a test routinely runs for minutes — so this is only the connect-and-write
+ * window. Conflating the two makes every message to a busy peer fail
+ * deterministically at 30 seconds, which is what a peer that is merely working
+ * looks like from the outside.
  */
 export const PEER_INBOX_LINE_TIMEOUT_MS = 30_000;
+
+/**
+ * How long to wait for the peer's reply once the line is out.
+ *
+ * The peer's answer is a bonus, not the delivery: §4.4 defines delivery as the
+ * message reaching the receiving session, and §4.9 is what exists for "tell me
+ * when it is done" rather than holding the caller's Turn open for it. A peer
+ * that is itself messaging a third session can take many minutes to answer,
+ * and a sender blocked that long is worse than one told the message landed and
+ * the reply is still coming.
+ */
+export const PEER_INBOX_REPLY_TIMEOUT_MS = 2 * 60_000;
 
 export interface PeerInboxPaths {
   readonly inboxDir: string;
@@ -88,21 +106,61 @@ export function peerInboxPaths(dataDir: DataDirInput, sessionId: string): PeerIn
 
 /** The socket files that exist right now. A dead session leaves nothing behind. */
 export async function listBoundPeerSessions(dataDir: DataDirInput): Promise<string[]> {
+  return (await scanInboxSockets(dataDir)).map((entry) => entry.sessionId);
+}
+
+async function scanInboxSockets(dataDir: DataDirInput): Promise<Array<{ sessionId: string; path: string }>> {
   const dir = typeof dataDir === 'function' ? dataDir() : dataDir;
   const candidates = [
     join(dir, 'run', 'inbox'),
     join(tmpdir(), `mcode-inbox-${currentUid()}`),
   ];
-  const found = new Set<string>();
+  const found = new Map<string, string>();
   for (const dirPath of candidates) {
-    const entries = await readDirSafe(dirPath);
-    for (const entry of entries) {
+    for (const entry of await readDirSafe(dirPath)) {
       if (!entry.isFile() && !entry.isSocket()) continue;
       const match = /^([A-Za-z0-9_-]+)\.sock$/.exec(entry.name);
-      if (match) found.add(match[1] as string);
+      if (match) found.set(match[1] as string, join(dirPath, entry.name));
     }
   }
-  return [...found];
+  return [...found].map(([sessionId, path]) => ({ sessionId, path }));
+}
+
+/**
+ * Drops inbox sockets whose session is no longer running.
+ *
+ * A socket file outlives the process that bound it whenever that process dies
+ * without closing: a killed worker, a closed terminal, a crash. §4.11 says a
+ * session appears only while it can receive messages, so a leftover file would
+ * advertise a target that accepts a connection and then answers with ECONNREFUSED
+ * — a ghost in the roster that looks exactly like a live session.
+ *
+ * Probing is a connect attempt with no data written, so a live session is left
+ * untouched: it sees a connection that closes without saying anything, which
+ * its own line reader discards as an empty line.
+ */
+export async function pruneStaleInboxes(dataDir: DataDirInput): Promise<string[]> {
+  const removed: string[] = [];
+  for (const { sessionId, path } of await scanInboxSockets(dataDir)) {
+    const alive = await isSocketLive(path);
+    if (alive) continue;
+    await rm(path, { force: true }).catch(() => undefined);
+    removed.push(sessionId);
+  }
+  return removed;
+}
+
+function isSocketLive(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection(socketPath);
+    const settle = (alive: boolean) => {
+      socket.destroy();
+      resolve(alive);
+    };
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
+    setTimeout(() => settle(false), 1_000).unref?.();
+  });
 }
 
 export interface PeerInboxServerOptions {
@@ -250,7 +308,16 @@ export interface PeerSendOptions {
   readonly sessionId: string;
   readonly token?: string;
   readonly message: PeerMessageEnvelope;
+  /** Deadline for connecting and writing the request line. Defaults to 30s (§4.5). */
   readonly timeoutMs?: number;
+  /**
+   * How long to wait for the peer's reply after the line is out.
+   *
+   * Separate from {@link timeoutMs} on purpose: the peer runs a whole Turn to
+   * answer, so bounding that wait by the protocol's line deadline fails every
+   * message to any peer doing real work.
+   */
+  readonly replyTimeoutMs?: number;
   /**
    * Aborting the caller's Turn must release this connection rather than leave
    * it waiting out the line deadline: the message was part of a Turn that no
@@ -261,7 +328,17 @@ export interface PeerSendOptions {
 
 export type PeerSendResult =
   | { readonly ok: true; readonly reply: Extract<PeerInboxResponseLine, { type: 'reply' }> }
-  | { readonly ok: false; readonly reason: string; readonly detail?: 'held' | 'refused' };
+  /**
+   * `delivered: true` with no reply is not a failure: §4.4 defines delivery as
+   * the message reaching the receiving session. The sender is told plainly that
+   * it landed and that the answer is still pending, rather than being made to
+   * guess from a timeout that reads like a broken peer.
+   */
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      readonly detail?: 'held' | 'refused' | 'delivered-no-reply';
+    };
 
 /**
  * Delivers one message to a peer session and waits for its reply.
@@ -272,7 +349,8 @@ export type PeerSendResult =
  */
 export async function sendToPeerInbox(options: PeerSendOptions): Promise<PeerSendResult> {
   const paths = peerInboxPaths(options.dataDir, options.sessionId);
-  const timeoutMs = options.timeoutMs ?? PEER_INBOX_LINE_TIMEOUT_MS;
+  const lineTimeoutMs = options.timeoutMs ?? PEER_INBOX_LINE_TIMEOUT_MS;
+  const replyTimeoutMs = options.replyTimeoutMs ?? PEER_INBOX_REPLY_TIMEOUT_MS;
 
   return new Promise<PeerSendResult>((resolve) => {
     let settled = false;
@@ -282,7 +360,8 @@ export async function sendToPeerInbox(options: PeerSendOptions): Promise<PeerSen
     const finish = (result: PeerSendResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(lineTimer);
+      clearTimeout(replyTimer);
       options.signal?.removeEventListener('abort', onAbort);
       socket.destroy();
       resolve(result);
@@ -290,10 +369,15 @@ export async function sendToPeerInbox(options: PeerSendOptions): Promise<PeerSen
 
     const onAbort = () => finish({ ok: false, reason: 'caller-aborted' });
 
-    const timer = setTimeout(() => {
-      finish({ ok: false, reason: 'peer-timeout' });
-    }, timeoutMs);
-    timer.unref?.();
+    // Two deadlines, switched at the moment the request is on the wire: the
+    // first bounds only connect-and-write, the second bounds the peer's Turn.
+    const lineTimer = setTimeout(() => {
+      finish({ ok: false, reason: 'peer-timeout: peer did not accept the connection' });
+    }, lineTimeoutMs);
+    lineTimer.unref?.();
+
+    let replyTimer: NodeJS.Timeout = setTimeout(() => undefined, 0);
+    replyTimer.unref?.();
 
     if (options.signal) {
       if (options.signal.aborted) {
@@ -364,6 +448,17 @@ export async function sendToPeerInbox(options: PeerSendOptions): Promise<PeerSen
       // caller knows the token, and its absence is not an error.
       if (options.token) socket.write(`${JSON.stringify({ type: 'auth', token: options.token })}\n`);
       socket.write(`${JSON.stringify(options.message)}\n`);
+      // The request is out; from here the wait belongs to the peer's Turn.
+      clearTimeout(lineTimer);
+      replyTimer = setTimeout(() => {
+        finish({
+          ok: false,
+          reason:
+            'delivered, but the session has not answered yet: it is still working on it or on something else. Its reply will appear in that session.',
+          detail: 'delivered-no-reply',
+        });
+      }, replyTimeoutMs);
+      replyTimer.unref?.();
     });
   });
 }

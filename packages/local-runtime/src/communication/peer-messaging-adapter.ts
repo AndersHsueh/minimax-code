@@ -3,6 +3,7 @@ import type { RuntimeConversation } from '@mavis/conversation-contract';
 
 import {
   listBoundPeerSessions,
+  pruneStaleInboxes,
   sendToPeerInbox,
   type PeerMessageEnvelope,
 } from '../communication/peer-inbox.js';
@@ -35,6 +36,11 @@ export interface PeerMessagingDeps {
   ): Promise<LocalSessionRecord[]>;
   /** Resolves the name the user gave a session, for the reply address. */
   readSessionName(sessionId: string): Promise<string | undefined>;
+  /**
+   * How long `sendMessage` waits for the peer's answer before reporting
+   * delivery without one. Defaults to the client default.
+   */
+  readonly replyTimeoutMs?: number;
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -57,6 +63,7 @@ export function buildPeerMessagingAdapter(deps: PeerMessagingDeps): LocalPeerMes
 async function listPeers(deps: PeerMessagingDeps, selfSessionId: string): Promise<
   LocalPeerSessionSummary[]
 > {
+  await pruneStaleInboxes(deps.dataDir);
   const bound = new Set(await listBoundPeerSessions(deps.dataDir));
   if (bound.size === 0) {
     // The caller still appears: it is running, and the first row is the name its
@@ -104,6 +111,7 @@ async function sendMessage(
   },
   signal?: AbortSignal,
 ): Promise<LocalPeerSendOutcome> {
+  await pruneStaleInboxes(deps.dataDir);
   const bound = new Set(await listBoundPeerSessions(deps.dataDir));
   if (bound.size === 0) {
     return {
@@ -128,6 +136,7 @@ async function sendMessage(
     dataDir: deps.dataDir,
     sessionId: target.sessionId,
     message: envelope,
+    ...(deps.replyTimeoutMs !== undefined ? { replyTimeoutMs: deps.replyTimeoutMs } : {}),
     ...(signal ? { signal } : {}),
   });
 
@@ -142,6 +151,17 @@ async function sendMessage(
       return {
         delivered: false,
         reason: `${target.name ?? target.sessionId} refused the message (${result.reason})`,
+      };
+    }
+    if (result.detail === 'delivered-no-reply') {
+      // §4.4: delivery is the message reaching the receiving session. Saying so
+      // stops the sender from re-sending the same text into a session that has
+      // already received it, which is how a message loop starts.
+      return {
+        delivered: true,
+        reply: '',
+        targetSessionId: target.sessionId,
+        ...(target.name ? { targetName: target.name } : {}),
       };
     }
     return { delivered: false, reason: result.reason };

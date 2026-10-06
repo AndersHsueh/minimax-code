@@ -6,12 +6,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   listBoundPeerSessions,
+  pruneStaleInboxes,
   sendToPeerInbox,
   startPeerInbox,
   type PeerInboxHandle,
   type PeerMessageEnvelope,
 } from '../packages/local-runtime/src/communication/peer-inbox.js';
 import { releaseAllSessionInboxes } from '../packages/local-runtime/src/communication/peer-inbox-manager.js';
+import { startSessionPeerInbox } from '../packages/local-runtime/src/communication/session-peer-inbox.js';
 import { buildPeerMessagingAdapter } from '../packages/local-runtime/src/communication/peer-messaging-adapter.js';
 import { renderInboundText } from '../packages/local-runtime/src/communication/session-peer-inbox.js';
 import { ListAgentsTool, SendMessageTool } from '../packages/agent-tools/src/desktop/local-peer-message.js';
@@ -462,4 +464,260 @@ describe('the two tools the agent calls', () => {
     expect(result.text).toContain('No other session');
     expect(result.isError).toBeUndefined();
   });
+});
+describe('the loop throttle (§4.12)', () => {
+  /** A receiving session whose model always answers, and can be made slow. */
+  function receiver(replyDelayMs = 0) {
+    const turns: string[] = [];
+    return {
+      turns,
+      conversation: {
+        ingress: {
+          submit: async (req: { sessionId: string; message: { content: string } }) => {
+            if (replyDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, replyDelayMs));
+            turns.push(req.message.content);
+            return {
+              turnId: 'turn-1',
+              completion: Promise.resolve({
+                status: 'completed' as const,
+                messages: [{ role: 'assistant', text: 'ack' }],
+              }),
+            };
+          },
+          abort: async () => undefined,
+        },
+      },
+    };
+  }
+
+  const post = (dataDir: string, sessionId: string, from: string, content: string) =>
+    sendToPeerInbox({
+      dataDir,
+      sessionId,
+      message: { type: 'message', fromSessionId: from, content },
+    });
+
+  it('drops an identical message arriving moments later', async () => {
+    const dataDir = await tempDataDir();
+    const { conversation, turns } = receiver();
+    const handle = await startSessionPeerInbox({ dataDir, sessionId: 'loop-a', conversation });
+    MANAGED.push(handle);
+
+    expect((await post(dataDir, 'loop-a', 'peer-1', 'are you there?')).ok).toBe(true);
+    const second = await post(dataDir, 'loop-a', 'peer-1', 'are you there?');
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toContain('identical');
+    expect(turns).toHaveLength(1);
+  });
+
+  it('stops a loop even when every message is different', async () => {
+    const dataDir = await tempDataDir();
+    const { conversation, turns } = receiver();
+    const handle = await startSessionPeerInbox({ dataDir, sessionId: 'loop-b', conversation });
+    MANAGED.push(handle);
+
+    const results = [];
+    for (let index = 0; index < 12; index += 1) {
+      results.push(await post(dataDir, 'loop-b', 'peer-1', `message number ${index}`));
+    }
+    const refused = results.filter((result) => !result.ok);
+    expect(refused.length).toBeGreaterThan(0);
+    expect(turns.length).toBeLessThan(12);
+  });
+
+  it('says plainly that a held message was not kept, rather than implying it waits', async () => {
+    const dataDir = await tempDataDir();
+    const { conversation, turns } = receiver();
+    const handle = await startSessionPeerInbox({
+      dataDir,
+      sessionId: 'hold-a',
+      conversation,
+      inbound: 'hold',
+    });
+    MANAGED.push(handle);
+
+    const result = await post(dataDir, 'hold-a', 'peer-1', 'anything');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('not kept');
+      expect(result.detail).toBe('refused');
+    }
+    expect(turns).toHaveLength(0);
+  });
+
+  it('refuses a session that refuses, and runs no Turn', async () => {
+    const dataDir = await tempDataDir();
+    const { conversation, turns } = receiver();
+    const handle = await startSessionPeerInbox({
+      dataDir,
+      sessionId: 'refuse-a',
+      conversation,
+      inbound: 'refuse',
+    });
+    MANAGED.push(handle);
+
+    const result = await post(dataDir, 'refuse-a', 'peer-1', 'anything');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain('refuses');
+    expect(turns).toHaveLength(0);
+  });
+
+  it('waits for a peer that takes its time, past the 30s line deadline', async () => {
+    const dataDir = await tempDataDir();
+    // Slow enough that a caller reusing the protocol's line deadline for the
+    // whole exchange would have given up, fast enough to keep the suite quick.
+    const { conversation } = receiver(120);
+    const handle = await startSessionPeerInbox({ dataDir, sessionId: 'slow-a', conversation });
+    MANAGED.push(handle);
+
+    const result = await post(dataDir, 'slow-a', 'peer-1', 'take your time');
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.reply.content).toBe('ack');
+  });
+});
+
+describe('admitting a message to a busy session (§4.4)', () => {
+  /** A session whose Turn is busy for the first `busyFor` admissions. */
+  function busyThenFree(busyFor: number, admission: { count: number; content: string[] }) {
+    return {
+      ingress: {
+        submit: async (req: { message: { content: string } }) => {
+          admission.count += 1;
+          if (admission.count <= busyFor) {
+            throw new Error('Internal error: Session already has an active Turn.');
+          }
+          admission.content.push(req.message.content);
+          return {
+            turnId: 'turn-1',
+            completion: Promise.resolve({
+              status: 'completed' as const,
+              messages: [{ role: 'assistant', text: 'stopped and reported' }],
+            }),
+          };
+        },
+        abort: async () => undefined,
+      },
+    };
+  }
+
+  const fastRetry = { intervalMs: 5, deadlineMs: 4_000 };
+
+  it('waits for the running Turn instead of refusing or interrupting it', async () => {
+    const dataDir = await tempDataDir();
+    const admission = { count: 0, content: [] as string[] };
+    const handle = await startSessionPeerInbox({
+      dataDir,
+      sessionId: 'busy-1',
+      conversation: busyThenFree(3, admission),
+      admitRetry: fastRetry,
+    });
+    MANAGED.push(handle);
+
+    const result = await sendToPeerInbox({
+      dataDir,
+      sessionId: 'busy-1',
+      message: { type: 'message', fromSessionId: 'peer', content: 'stop what you are doing' },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.reply.content).toBe('stopped and reported');
+    // The message ran exactly once, on the Turn that started after the busy one
+    // finished — not merged into the busy Turn and not attempted five times.
+    expect(admission.content).toHaveLength(1);
+  });
+
+  it('gives up on a session that never frees up, and says so', async () => {
+    const dataDir = await tempDataDir();
+    const admission = { count: 0, content: [] as string[] };
+    const handle = await startSessionPeerInbox({
+      dataDir,
+      sessionId: 'busy-2',
+      conversation: busyThenFree(Number.MAX_SAFE_INTEGER, admission),
+      admitRetry: fastRetry,
+    });
+    MANAGED.push(handle);
+
+    const result = await sendToPeerInbox({
+      dataDir,
+      sessionId: 'busy-2',
+      message: { type: 'message', fromSessionId: 'peer', content: 'are you there' },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain('stayed busy');
+    expect(admission.content).toHaveLength(0);
+  });
+});
+
+describe('a session that died without closing its socket', () => {
+  it('is dropped from the roster instead of answering with ECONNREFUSED', async () => {
+    const dataDir = await tempDataDir();
+    const inbox = await openInbox(dataDir, 'alive', () => 'ok');
+    await inbox.handle.close();
+
+    // The close removed the file. Put it back to model a process that died:
+    // the inode is gone but the path a peer would dial is still there.
+    const { symlink, mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(dataDir, 'run', 'inbox'), { recursive: true });
+    await writeFile(join(dataDir, 'run', 'inbox', 'alive.sock'), 'not a live socket');
+
+    expect(await listBoundPeerSessions(dataDir)).toContain('alive');
+    await pruneStaleInboxes(dataDir);
+    expect(await listBoundPeerSessions(dataDir)).not.toContain('alive');
+    void symlink;
+  });
+
+  it('leaves a session that is still listening alone', async () => {
+    const dataDir = await tempDataDir();
+    await openInbox(dataDir, 'live-one', () => 'ok');
+    expect(await pruneStaleInboxes(dataDir)).toEqual([]);
+    expect(await listBoundPeerSessions(dataDir)).toContain('live-one');
+  });
+});
+
+describe('delivery is not the same as a reply (§4.4)', () => {
+  it('reports a peer that took too long as delivered, so the model does not re-send', async () => {
+    const dataDir = await tempDataDir();
+    const deps = { ...runtimeHarness(dataDir, {
+      'sess-a': { title: 'mmx-a' },
+      'sess-b': { title: 'mmx-b' },
+    }).deps, replyTimeoutMs: 150 };
+    // A peer that never answers: the message still reached it.
+    const inbox = await openInbox(dataDir, 'sess-b', () => new Promise<string>(() => {}));
+    const tool = new SendMessageTool(buildPeerMessagingAdapter(deps));
+
+    const result = await tool.execute(
+      { sessionId: 'sess-a' } as LocalRuntimeToolContext,
+      { to: 'mmx-b', message: 'ping' },
+    );
+    expect(inbox.received).toHaveLength(1);
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain('has not replied');
+  });
+
+  it('tells the model not to re-send when delivery happened without an answer', async () => {
+    const tool = new SendMessageTool(
+      stubAdapterForNoReply(),
+    );
+    const result = await tool.execute(
+      { sessionId: 'sess-a' } as LocalRuntimeToolContext,
+      { to: 'mmx-b', message: 'ping' },
+    );
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain('has not replied');
+    expect(result.text).toContain('Do not send this message again');
+    expect(result.details?.replied).toBe(false);
+  });
+
+  function stubAdapterForNoReply() {
+    return {
+      listPeers: async () => [],
+      sendMessage: async () => ({
+        delivered: true as const,
+        reply: '',
+        targetSessionId: 'sess-b',
+        targetName: 'mmx-b',
+      }),
+    };
+  }
 });

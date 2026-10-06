@@ -79,6 +79,10 @@ import { resolveTuiEffortChoice } from "../application/model-effort.js";
 import type { TuiObservability } from "../observability/index.js";
 import type { TuiTokenPlanAccountStatus } from "../account/matrix-account-client.js";
 import type { TuiDailyCheckinOutcome } from "../checkin/application.js";
+import {
+  LIGHTWEIGHT_SESSION_PURPOSE,
+  type McodeContextMode,
+} from "@mavis/protocol/local";
 
 export * from "./port.js";
 
@@ -93,6 +97,7 @@ export interface TuiRuntimeAdapterOptions {
   synchronizeAuth?: () => Promise<void>;
   accountIdentityGetter?: () => TuiAccountStatus["identity"];
   observability?: TuiObservability;
+  contextMode?: McodeContextMode;
   tokenPlanAccountStatusGetter?: (options?: {
     readonly forceRefresh?: boolean;
   }) => Promise<TuiTokenPlanAccountStatus>;
@@ -134,6 +139,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   private readonly accountIdentityGetter: TuiRuntimeAdapterOptions["accountIdentityGetter"];
   private readonly feedback: TuiRuntimeAdapterOptions["feedback"];
   private readonly dailyCheckin: TuiRuntimeAdapterOptions["dailyCheckin"];
+  private readonly contextMode: McodeContextMode;
 
   constructor(cliService: CliService, options: TuiRuntimeAdapterOptions = {}) {
     this.cliService = cliService;
@@ -144,6 +150,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.accountIdentityGetter = options.accountIdentityGetter;
     this.feedback = options.feedback;
     this.dailyCheckin = options.dailyCheckin;
+    this.contextMode = options.contextMode ?? "standard";
     this.conversationAccess = new TuiConversationAccess(cliService);
     this.initialModelSelection = options.initialModelSelection;
     this.pluginAccess = new TuiPluginAccess(cliService);
@@ -201,9 +208,15 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   }
 
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
+const sessionInput =
+      this.contextMode === "lightweight" && !input.parentSessionId && !input.purpose
+        ? { ...input, purpose: LIGHTWEIGHT_SESSION_PURPOSE }
+        : input;
     const pinned = this.initialModelSelection;
     if (pinned?.providerId && pinned.modelId) {
-      return this.sessionAccess.createSession(input, {
+      // Uses `sessionInput`, not `input`: a pinned model changes which model runs
+      // the Turn, not whether the session is a lightweight one.
+      return this.sessionAccess.createSession(sessionInput, {
         providerId: pinned.providerId,
         modelId: pinned.modelId,
         ...(pinned.variant !== undefined ? { variant: pinned.variant } : {}),
@@ -214,11 +227,11 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       .listModels()
       .then((models) => models.find((model) => model.selected === true))
       .catch(() => undefined);
-    if (!defaultModel) return this.sessionAccess.createSession(input);
+    if (!defaultModel) return this.sessionAccess.createSession(sessionInput);
     // Inherit Runtime's saved global selection before catalog defaults, using
     // the same rule as the status line and without changing existing Sessions.
     const effort = resolveTuiEffortChoice(defaultModel)?.trim();
-    return this.sessionAccess.createSession(input, {
+    return this.sessionAccess.createSession(sessionInput, {
       providerId: defaultModel.providerId,
       modelId: defaultModel.modelId,
       ...(defaultModel.variant !== undefined

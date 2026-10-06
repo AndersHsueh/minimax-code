@@ -705,13 +705,6 @@ export const SendMessageToolDef = {
         'Plain text for the other session. It must stand on its own: the other session does not see ' +
         'this conversation.',
     }),
-    notify_when_idle: Type.Optional(
-      Type.Boolean({
-        description:
-          'Ask the other session to send one notice back when it next goes idle or exits. Use it when ' +
-          'the user is waiting on long work there instead of polling. Same-machine targets only.',
-      }),
-    ),
   }),
 } as const satisfies ToolDefinition;
 export type SendMessageToolInput = Static<typeof SendMessageToolDef.schema>;

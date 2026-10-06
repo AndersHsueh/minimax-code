@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, rm } from 'node:fs/promises';
+import { existsSync, lstatSync, type Dirent } from 'node:fs';
+import { chmod, mkdir, readdir, rm } from 'node:fs/promises';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +34,6 @@ export interface PeerMessageEnvelope {
   readonly fromSessionId: string;
   readonly fromName?: string;
   readonly content: string;
-  readonly notifyWhenIdle?: boolean;
 }
 
 export interface PeerInboxAuthLine {
@@ -41,12 +41,15 @@ export interface PeerInboxAuthLine {
   readonly token: string;
 }
 
-export type PeerInboxRequestLine = PeerMessageEnvelope | PeerInboxAuthLine;
-
 export type PeerInboxResponseLine =
-  | { readonly type: 'reply'; readonly sessionId: string; readonly turnId?: string; readonly content: string }
-  | { readonly type: 'held'; readonly sessionId: string; readonly reason: string }
-  | { readonly type: 'refused'; readonly sessionId: string; readonly reason: string };
+  | { readonly type: 'reply'; readonly sessionId: string; readonly content: string }
+  | {
+      readonly type: 'refused';
+      readonly sessionId: string;
+      readonly reason: string;
+      /** `throttled` = our loop guard dropped it, not a decision the session made. */
+      readonly kind?: 'refused' | 'throttled';
+    };
 
 /**
  * §4.5: Claude Code closes a connection that has not sent a complete line
@@ -76,7 +79,29 @@ export const PEER_INBOX_REPLY_TIMEOUT_MS = 2 * 60_000;
 export interface PeerInboxPaths {
   readonly inboxDir: string;
   readonly socketPath: string;
-  readonly socketIsFallback: boolean;
+}
+
+/**
+ * Where inbox sockets live, shortest name first, each candidate within the
+ * `sun_path` budget.
+ *
+ * One function owns this list because binding and scanning must agree on it: a
+ * directory the binder writes into but the scanner never reads produces a
+ * session that is running yet invisible to `ListAgents` and unreachable by name,
+ * which is the exact failure this list exists to prevent.
+ */
+function inboxDirCandidates(dataDir: DataDirInput): string[] {
+  const dir = typeof dataDir === 'function' ? dataDir() : dataDir;
+  return [
+    // §4.5: the session's own dataDir first, so an isolated dataDir keeps its
+    // sessions isolated from another dataDir's. Then a short per-user directory,
+    // with `/tmp` ahead of the platform temp directory because macOS hands out a
+    // `/var/folders/...` path long enough to push a normal session id past the
+    // limit on its own.
+    join(dir, 'run', 'inbox'),
+    join('/tmp', `mcode-inbox-${currentUid()}`),
+    join(tmpdir(), `mcode-inbox-${currentUid()}`),
+  ];
 }
 
 /**
@@ -86,80 +111,99 @@ export interface PeerInboxPaths {
  * inbox directory has to follow the dataDir that created the session.
  */
 export function peerInboxPaths(dataDir: DataDirInput, sessionId: string): PeerInboxPaths {
-  const dir = typeof dataDir === 'function' ? dataDir() : dataDir;
-  const base = join(dir, 'run', 'inbox');
-  const preferred = join(base, `${sessionId}.sock`);
   const limit = sunPathLimit();
-  if (Buffer.byteLength(preferred) < limit) {
-    return { inboxDir: base, socketPath: preferred, socketIsFallback: false };
+  const name = `${sessionId}.sock`;
+  for (const inboxDir of inboxDirCandidates(dataDir)) {
+    const socketPath = join(inboxDir, name);
+    if (Buffer.byteLength(socketPath) < limit) return { inboxDir, socketPath };
   }
-  // §4.5: when the preferred directory cannot hold the socket, fall back to a
-  // per-user private directory. The digest keeps two dataDirs from colliding.
-  const digest = createHash('sha256').update(dir).digest('hex').slice(0, 16);
-  const fallbackDir = join(tmpdir(), `mcode-inbox-${currentUid()}`, digest);
-  return {
-    inboxDir: fallbackDir,
-    socketPath: join(fallbackDir, `${sessionId}.sock`),
-    socketIsFallback: true,
-  };
-}
-
-/** The socket files that exist right now. A dead session leaves nothing behind. */
-export async function listBoundPeerSessions(dataDir: DataDirInput): Promise<string[]> {
-  return (await scanInboxSockets(dataDir)).map((entry) => entry.sessionId);
-}
-
-async function scanInboxSockets(dataDir: DataDirInput): Promise<Array<{ sessionId: string; path: string }>> {
-  const dir = typeof dataDir === 'function' ? dataDir() : dataDir;
-  const candidates = [
-    join(dir, 'run', 'inbox'),
-    join(tmpdir(), `mcode-inbox-${currentUid()}`),
-  ];
-  const found = new Map<string, string>();
-  for (const dirPath of candidates) {
-    for (const entry of await readDirSafe(dirPath)) {
-      if (!entry.isFile() && !entry.isSocket()) continue;
-      const match = /^([A-Za-z0-9_-]+)\.sock$/.exec(entry.name);
-      if (match) found.set(match[1] as string, join(dirPath, entry.name));
-    }
-  }
-  return [...found].map(([sessionId, path]) => ({ sessionId, path }));
+  // Neither short directory fits a session id this long. The socket still binds,
+  // but under a name that cannot be read back as a session id, so the session is
+  // reachable by id and absent from `ListAgents`.
+  const digest = createHash('sha256')
+    .update(`${String(typeof dataDir === 'function' ? dataDir() : dataDir)}\u0000${sessionId}`)
+    .digest('hex')
+    .slice(0, 24);
+  const inboxDir = join('/tmp', `mcode-inbox-${currentUid()}`);
+  return { inboxDir, socketPath: join(inboxDir, `${digest}.sock`) };
 }
 
 /**
- * Drops inbox sockets whose session is no longer running.
+ * The sessions that can actually receive a message right now.
  *
  * A socket file outlives the process that bound it whenever that process dies
  * without closing: a killed worker, a closed terminal, a crash. §4.11 says a
  * session appears only while it can receive messages, so a leftover file would
- * advertise a target that accepts a connection and then answers with ECONNREFUSED
- * — a ghost in the roster that looks exactly like a live session.
+ * advertise a target that accepts a connection and then answers with
+ * ECONNREFUSED — a ghost in the roster that looks exactly like a live session.
+ * Those are deleted here rather than listed and then failed against.
  *
  * Probing is a connect attempt with no data written, so a live session is left
- * untouched: it sees a connection that closes without saying anything, which
- * its own line reader discards as an empty line.
+ * untouched: it sees a connection that closes without saying anything, which its
+ * own line reader discards as an empty line.
+ *
+ * Scanning and pruning are one pass on purpose — the caller needs the survivors,
+ * and a second directory read to collect what the first one already saw is the
+ * common case rather than a rare one.
  */
-export async function pruneStaleInboxes(dataDir: DataDirInput): Promise<string[]> {
-  const removed: string[] = [];
-  for (const { sessionId, path } of await scanInboxSockets(dataDir)) {
-    const alive = await isSocketLive(path);
-    if (alive) continue;
-    await rm(path, { force: true }).catch(() => undefined);
-    removed.push(sessionId);
+export async function listLiveInboxes(dataDir: DataDirInput): Promise<string[]> {
+  const alive: string[] = [];
+  const sockets = await scanInboxSockets(dataDir);
+  const live = await Promise.all(sockets.map((entry) => isSocketLive(entry.path)));
+  for (const [index, entry] of sockets.entries()) {
+    if (live[index]) {
+      alive.push(entry.sessionId);
+      continue;
+    }
+    await rm(entry.path, { force: true }).catch(() => undefined);
   }
-  return removed;
+  return alive;
+}
+
+function scanInboxSockets(dataDir: DataDirInput): Promise<Array<{ sessionId: string; path: string }>> {
+  // The same candidate list the binder walks, so a session that bound into a
+  // fallback directory is found here too.
+  return Promise.all(inboxDirCandidates(dataDir).map(scanInboxDirectory)).then((scanned) => {
+    const found = new Map<string, string>();
+    for (const entries of scanned) {
+      for (const { entry, path } of entries) {
+        if (!entry.isFile() && !entry.isSocket()) continue;
+        const match = /^([A-Za-z0-9_-]+)\.sock$/.exec(entry.name);
+        if (match) found.set(match[1] as string, path);
+      }
+    }
+    return [...found].map(([sessionId, path]) => ({ sessionId, path }));
+  });
+}
+
+async function scanInboxDirectory(
+  dir: string,
+): Promise<Array<{ entry: Dirent; path: string }>> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.map((entry) => ({ entry, path: join(dir, entry.name) }));
+  } catch {
+    return [];
+  }
 }
 
 function isSocketLive(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection(socketPath);
+    let done = false;
     const settle = (alive: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
       socket.destroy();
       resolve(alive);
     };
+    // A dead socket refuses immediately; the timer only bounds a path that
+    // accepts the connection and then never completes it.
+    const timer = setTimeout(() => settle(false), 1_000);
+    timer.unref?.();
     socket.once('connect', () => settle(true));
     socket.once('error', () => settle(false));
-    setTimeout(() => settle(false), 1_000).unref?.();
   });
 }
 
@@ -179,8 +223,14 @@ export interface PeerInboxServerOptions {
    * connection: §4.9 makes the sender reachable again, and a caller that cannot
    * see what the other session said has to poll for it.
    */
-  readonly deliver: (message: PeerMessageEnvelope) => Promise<string>;
-  readonly now?: () => number;
+  /**
+   * Hands the message to the receiving session.
+   *
+   * `signal` aborts when the peer goes away. Delivery can take minutes while a
+   * Turn is in flight, and without this the server would keep waiting — and
+   * could still start a Turn whose reply has nobody left to read it.
+   */
+  readonly deliver: (message: PeerMessageEnvelope, signal: AbortSignal) => Promise<string>;
 }
 
 export interface PeerInboxHandle {
@@ -241,6 +291,10 @@ async function serveConnection(socket: Socket, options: PeerInboxServerOptions):
     socket.end(`${JSON.stringify(line)}\n`);
   };
 
+  const gone = new AbortController();
+  socket.once('close', () => gone.abort());
+  socket.once('error', () => gone.abort());
+
   try {
     for await (const raw of lines) {
       const parsed = parseJson(raw);
@@ -269,7 +323,6 @@ async function serveConnection(socket: Socket, options: PeerInboxServerOptions):
         fromSessionId: typeof parsed.fromSessionId === 'string' ? parsed.fromSessionId : 'unknown',
         ...(typeof parsed.fromName === 'string' ? { fromName: parsed.fromName } : {}),
         content: typeof parsed.content === 'string' ? parsed.content : '',
-        ...(parsed.notifyWhenIdle === true ? { notifyWhenIdle: true } : {}),
       };
       if (options.token && !authenticated) {
         await finish({
@@ -280,17 +333,15 @@ async function serveConnection(socket: Socket, options: PeerInboxServerOptions):
         return;
       }
       try {
-        const content = await options.deliver(envelope);
+        const content = await options.deliver(envelope, gone.signal);
         await finish({ type: 'reply', sessionId: options.sessionId, content });
       } catch (error) {
-        // §4.6 distinguishes the two refusals: `held` means the message is set
-        // aside for the user and the sender should know it is waiting, while a
-        // plain refusal means nothing will ever arrive.
-        const inbound = (error as { peerInbound?: unknown } | undefined)?.peerInbound;
+        const kind = (error as { kind?: unknown } | undefined)?.kind;
         await finish({
-          type: inbound === 'held' ? 'held' : 'refused',
+          type: 'refused',
           sessionId: options.sessionId,
           reason: error instanceof Error ? error.message : String(error),
+          ...(kind === 'throttled' ? { kind } : {}),
         });
       }
       return;
@@ -337,7 +388,7 @@ export type PeerSendResult =
   | {
       readonly ok: false;
       readonly reason: string;
-      readonly detail?: 'held' | 'refused' | 'delivered-no-reply';
+      readonly detail?: 'refused' | 'throttled' | 'delivered-no-reply';
     };
 
 /**
@@ -418,24 +469,15 @@ export async function sendToPeerInbox(options: PeerSendOptions): Promise<PeerSen
               reply: {
                 type: 'reply',
                 sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : '',
-                ...(typeof parsed.turnId === 'string' ? { turnId: parsed.turnId } : {}),
                 content: typeof parsed.content === 'string' ? parsed.content : '',
               },
-            });
-            return;
-          }
-          if (parsed.type === 'held') {
-            finish({
-              ok: false,
-              reason: typeof parsed.reason === 'string' ? parsed.reason : 'held',
-              detail: 'held',
             });
             return;
           }
           finish({
             ok: false,
             reason: typeof parsed.reason === 'string' ? parsed.reason : 'refused',
-            detail: 'refused',
+            detail: parsed.kind === 'throttled' ? 'throttled' : 'refused',
           });
           return;
         }
@@ -472,7 +514,6 @@ async function removeStaleSocket(socketPath: string): Promise<void> {
   // A socket left by a process that died has no listener; binding over it would
   // fail with EADDRINUSE. Removing it first is safe precisely because nothing
   // is listening: a live session would still hold its own socket open.
-  const { existsSync, lstatSync } = await import('node:fs');
   if (!existsSync(socketPath)) return;
   try {
     const stat = lstatSync(socketPath);
@@ -507,15 +548,6 @@ function parseJson(raw: string): Record<string, unknown> | undefined {
       : undefined;
   } catch {
     return undefined;
-  }
-}
-
-async function readDirSafe(dir: string) {
-  try {
-    const { readdir } = await import('node:fs/promises');
-    return await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
   }
 }
 

@@ -5,8 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  listBoundPeerSessions,
-  pruneStaleInboxes,
+  listLiveInboxes,
   sendToPeerInbox,
   startPeerInbox,
   type PeerInboxHandle,
@@ -33,7 +32,8 @@ import type {
  */
 
 const OPEN: LocalInbox[] = [];
-const MANAGED: LocalInbox[] = [];
+/** Handles opened through startSessionPeerInbox, released by the manager. */
+const MANAGED: Array<{ close(): Promise<void> }> = [];
 
 afterEach(async () => {
   await Promise.all(OPEN.splice(0).map((inbox) => inbox.handle.close()));
@@ -146,7 +146,7 @@ describe('the session inbox socket', () => {
   it('surfaces a refusal the receiving session raised', async () => {
     const dataDir = await tempDataDir();
     await openInbox(dataDir, 'sess-b', () => {
-      throw Object.assign(new Error('this session refuses messages'), { peerInbound: 'refused' });
+      throw new Error('this session refuses messages');
     });
 
     const result = await sendToPeerInbox({
@@ -162,36 +162,20 @@ describe('the session inbox socket', () => {
     }
   });
 
-  it('distinguishes a held message from a refused one (§4.6)', async () => {
-    const dataDir = await tempDataDir();
-    await openInbox(dataDir, 'sess-b', () => {
-      throw Object.assign(new Error('waiting for approval'), { peerInbound: 'held' });
-    });
-
-    const result = await sendToPeerInbox({
-      dataDir,
-      sessionId: 'sess-b',
-      message: { type: 'message', fromSessionId: 'sess-a', content: 'hi' },
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.detail).toBe('held');
-  });
-
   it('lists only the sessions that actually bound a socket', async () => {
     const dataDir = await tempDataDir();
-    expect(await listBoundPeerSessions(dataDir)).toEqual([]);
+    expect(await listLiveInboxes(dataDir)).toEqual([]);
     await openInbox(dataDir, 'sess-a', () => 'ok');
     await openInbox(dataDir, 'sess-b', () => 'ok');
-    expect((await listBoundPeerSessions(dataDir)).sort()).toEqual(['sess-a', 'sess-b']);
+    expect((await listLiveInboxes(dataDir)).sort()).toEqual(['sess-a', 'sess-b']);
   });
 
   it('drops a session from the listing once its process closes the socket', async () => {
     const dataDir = await tempDataDir();
     const inbox = await openInbox(dataDir, 'sess-a', () => 'ok');
-    expect(await listBoundPeerSessions(dataDir)).toEqual(['sess-a']);
+    expect(await listLiveInboxes(dataDir)).toEqual(['sess-a']);
     await inbox.handle.close();
-    expect(await listBoundPeerSessions(dataDir)).toEqual([]);
+    expect(await listLiveInboxes(dataDir)).toEqual([]);
   });
 });
 
@@ -228,7 +212,6 @@ function runtimeHarness(
         ...(record.title ? { title: record.title } : {}),
         ...(record.workspaceDir ? { workspaceDir: record.workspaceDir } : {}),
       })),
-    readSessionName: async (sessionId: string) => sessions[sessionId]?.title,
   };
   return { deps, submitted };
 }
@@ -501,7 +484,6 @@ describe('the loop throttle (§4.12)', () => {
     const dataDir = await tempDataDir();
     const { conversation, turns } = receiver();
     const handle = await startSessionPeerInbox({ dataDir, sessionId: 'loop-a', conversation });
-    MANAGED.push(handle);
 
     expect((await post(dataDir, 'loop-a', 'peer-1', 'are you there?')).ok).toBe(true);
     const second = await post(dataDir, 'loop-a', 'peer-1', 'are you there?');
@@ -514,7 +496,6 @@ describe('the loop throttle (§4.12)', () => {
     const dataDir = await tempDataDir();
     const { conversation, turns } = receiver();
     const handle = await startSessionPeerInbox({ dataDir, sessionId: 'loop-b', conversation });
-    MANAGED.push(handle);
 
     const results = [];
     for (let index = 0; index < 12; index += 1) {
@@ -523,6 +504,32 @@ describe('the loop throttle (§4.12)', () => {
     const refused = results.filter((result) => !result.ok);
     expect(refused.length).toBeGreaterThan(0);
     expect(turns.length).toBeLessThan(12);
+  });
+
+  it('tells the sender a throttle fired, not that the session refused on policy', async () => {
+    const dataDir = await tempDataDir();
+    const { conversation, turns } = receiver();
+    const handle = await startSessionPeerInbox({ dataDir, sessionId: 'throttle-say', conversation });
+    MANAGED.push(handle);
+
+    const first = await sendToPeerInbox({
+      dataDir,
+      sessionId: 'throttle-say',
+      message: { type: 'message', fromSessionId: 'peer-1', content: 'only reply: ok' },
+    });
+    const repeat = await sendToPeerInbox({
+      dataDir,
+      sessionId: 'throttle-say',
+      message: { type: 'message', fromSessionId: 'peer-1', content: 'only reply: ok' },
+    });
+
+    expect(first.ok).toBe(true);
+    expect(repeat.ok).toBe(false);
+    if (!repeat.ok) {
+      expect(repeat.detail).toBe('throttled');
+      expect(repeat.reason).toContain('loop throttle');
+    }
+    expect(turns).toHaveLength(1);
   });
 
   it('says plainly that a held message was not kept, rather than implying it waits', async () => {
@@ -534,13 +541,13 @@ describe('the loop throttle (§4.12)', () => {
       conversation,
       inbound: 'hold',
     });
-    MANAGED.push(handle);
 
     const result = await post(dataDir, 'hold-a', 'peer-1', 'anything');
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain('not kept');
       expect(result.detail).toBe('refused');
+      // §4.6's hold no longer reports a message as waiting when nothing keeps it.
     }
     expect(turns).toHaveLength(0);
   });
@@ -554,7 +561,6 @@ describe('the loop throttle (§4.12)', () => {
       conversation,
       inbound: 'refuse',
     });
-    MANAGED.push(handle);
 
     const result = await post(dataDir, 'refuse-a', 'peer-1', 'anything');
     expect(result.ok).toBe(false);
@@ -562,13 +568,12 @@ describe('the loop throttle (§4.12)', () => {
     expect(turns).toHaveLength(0);
   });
 
-  it('waits for a peer that takes its time, past the 30s line deadline', async () => {
+  it('waits for a peer that takes its time instead of failing on the line deadline', async () => {
     const dataDir = await tempDataDir();
-    // Slow enough that a caller reusing the protocol's line deadline for the
-    // whole exchange would have given up, fast enough to keep the suite quick.
+    // The reply deadline is separate from the 30s protocol window, so a peer that
+    // needs a moment is answered rather than cut off.
     const { conversation } = receiver(120);
     const handle = await startSessionPeerInbox({ dataDir, sessionId: 'slow-a', conversation });
-    MANAGED.push(handle);
 
     const result = await post(dataDir, 'slow-a', 'peer-1', 'take your time');
     expect(result.ok).toBe(true);
@@ -600,7 +605,7 @@ describe('admitting a message to a busy session (§4.4)', () => {
     };
   }
 
-  const fastRetry = { intervalMs: 5, deadlineMs: 4_000 };
+  const fastRetry = { intervalMs: 5, deadlineMs: 400 };
 
   it('waits for the running Turn instead of refusing or interrupting it', async () => {
     const dataDir = await tempDataDir();
@@ -611,7 +616,6 @@ describe('admitting a message to a busy session (§4.4)', () => {
       conversation: busyThenFree(3, admission),
       admitRetry: fastRetry,
     });
-    MANAGED.push(handle);
 
     const result = await sendToPeerInbox({
       dataDir,
@@ -635,7 +639,6 @@ describe('admitting a message to a busy session (§4.4)', () => {
       conversation: busyThenFree(Number.MAX_SAFE_INTEGER, admission),
       admitRetry: fastRetry,
     });
-    MANAGED.push(handle);
 
     const result = await sendToPeerInbox({
       dataDir,
@@ -656,22 +659,21 @@ describe('a session that died without closing its socket', () => {
     await inbox.handle.close();
 
     // The close removed the file. Put it back to model a process that died:
-    // the inode is gone but the path a peer would dial is still there.
-    const { symlink, mkdir, writeFile } = await import('node:fs/promises');
+    // the listener is gone but the path a peer would dial is still there.
+    const { mkdir, writeFile } = await import('node:fs/promises');
     await mkdir(join(dataDir, 'run', 'inbox'), { recursive: true });
     await writeFile(join(dataDir, 'run', 'inbox', 'alive.sock'), 'not a live socket');
 
-    expect(await listBoundPeerSessions(dataDir)).toContain('alive');
-    await pruneStaleInboxes(dataDir);
-    expect(await listBoundPeerSessions(dataDir)).not.toContain('alive');
-    void symlink;
+    // Never reported as reachable, and cleaned up on the same pass.
+    expect(await listLiveInboxes(dataDir)).not.toContain('alive');
+    expect(await listLiveInboxes(dataDir)).not.toContain('alive');
   });
 
   it('leaves a session that is still listening alone', async () => {
     const dataDir = await tempDataDir();
     await openInbox(dataDir, 'live-one', () => 'ok');
-    expect(await pruneStaleInboxes(dataDir)).toEqual([]);
-    expect(await listBoundPeerSessions(dataDir)).toContain('live-one');
+    expect(await listLiveInboxes(dataDir)).toContain('live-one');
+    expect(await listLiveInboxes(dataDir)).toContain('live-one');
   });
 });
 

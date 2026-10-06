@@ -23,7 +23,6 @@ export interface EnsureSessionInboxOptions {
   readonly sessionId: string;
   readonly conversation: StartSessionPeerInboxOptions['conversation'];
   readonly inbound?: PeerInboundDecision;
-  readonly onReady?: StartSessionPeerInboxOptions['onReady'];
 }
 
 /**
@@ -50,7 +49,6 @@ export async function ensureSessionInbox(
     sessionId: options.sessionId,
     conversation: options.conversation,
     ...(options.inbound ? { inbound: options.inbound } : {}),
-    ...(options.onReady ? { onReady: options.onReady } : {}),
   })
     .then((handle) => {
       handles.set(options.sessionId, handle);
@@ -63,14 +61,6 @@ export async function ensureSessionInbox(
 
   starting.set(options.sessionId, attempt);
   return attempt;
-}
-
-/** Releases one session's inbox, e.g. when the session is deleted. */
-export async function releaseSessionInbox(sessionId: string): Promise<void> {
-  const handle = handles.get(sessionId);
-  if (!handle) return;
-  handles.delete(sessionId);
-  await handle.close().catch(() => undefined);
 }
 
 /** Releases every inbox this process bound. Called on shutdown. */

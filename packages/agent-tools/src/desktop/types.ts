@@ -909,7 +909,6 @@ export interface LocalPeerMessagingAdapter {
       /** A session name, or a session id. Never guessed at. */
       readonly to: string;
       readonly content: string;
-      readonly notifyWhenIdle?: boolean;
     },
     signal?: AbortSignal,
   ): Promise<LocalPeerSendOutcome>;

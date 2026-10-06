@@ -63,6 +63,7 @@ import {
 import { TuiDailyCheckinApplication } from '../checkin/application.js';
 import { TuiDailyCheckinHttpGateway } from '../checkin/http-gateway.js';
 import { createMcodeSharedAuthSession } from './auth-session.js';
+import type { McodeContextMode } from '@mavis/protocol/local';
 import { resolveTuiManagedBackendLane } from '../cli/environment.js';
 import {
   prepareTuiMcodeToolsIntegration,
@@ -82,9 +83,10 @@ export interface CreateTuiRuntimeOptions {
   surface?: TuiObservabilitySurface;
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
-  /** Model a headless worker pins for every Session it creates. `undefined` keeps
+/** Model a headless worker pins for every Session it creates. `undefined` keeps
    *  the user's saved global selection, which is what an interactive launch wants. */
   initialModelSelection?: TuiSessionModelSelection;
+  contextMode?: McodeContextMode;
   lane?: string;
 }
 
@@ -502,6 +504,7 @@ export async function createTuiRuntime(
           ? { initialModelSelection: options.initialModelSelection }
           : {}),
         observability,
+        ...(options.contextMode ? { contextMode: options.contextMode } : {}),
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)
           : (sessionId) => disposeTuiBrowserSessionStorage(options.dataDir, sessionId),
